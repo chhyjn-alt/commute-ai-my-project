@@ -10,25 +10,30 @@ from streamlit_folium import st_folium
 from datetime import datetime, timedelta, timezone
 
 # ==========================================
-# 1. 페이지 기본 설정
+# 1. 페이지 및 세션 기본 설정
 # ==========================================
 st.set_page_config(page_title="퇴근시간 최적화 AI", page_icon="🚗", layout="wide")
+
+# ⭐️ 수정 포인트: 지도 렌더링 시 화면이 초기화되는 현상을 방지하기 위해 세션 상태를 고정합니다.
+if 'run_status' not in st.session_state:
+    st.session_state.run_status = False
+
+def start_analysis():
+    st.session_state.run_status = True
 
 # ==========================================
 # 2. 핵심 로직 함수
 # ==========================================
 def get_real_road_path(waypoints):
-    """OSRM API를 호출하여 실제 도로망을 따라가는 위경도 경로를 추출합니다."""
     coord_str = ";".join([f"{lon},{lat}" for lat, lon in waypoints])
     url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=polyline"
     try:
         res = requests.get(url, timeout=5).json()
         return polyline.decode(res['routes'][0]['geometry'])
     except:
-        return waypoints # 에러 시 직선 반환
+        return waypoints 
 
 def get_realtime_weather():
-    """Open-Meteo API를 통해 현재 기상 상황을 수집합니다."""
     try:
         res = requests.get("https://api.open-meteo.com/v1/forecast?latitude=36.8065&longitude=127.1522&current_weather=true&timezone=auto", timeout=5).json()
         code = res['current_weather']['weathercode']
@@ -50,21 +55,21 @@ with st.sidebar:
     출발지 = st.text_input("출발지", "삼성디스플레이 아산1캠퍼스")
     목적지 = st.text_input("목적지", "충청남도 천안시 동남구 성황로 40")
     
-    # 시간과 날짜를 웹 UI에 맞게 입력받음
     탐색_시작시간 = st.time_input("탐색 시작시간", datetime.strptime("17:30", "%H:%M").time())
     탐색_종료시간 = st.time_input("탐색 종료시간", datetime.strptime("19:00", "%H:%M").time())
     지정_날짜 = st.date_input("분석 기준일 (날짜 선택)")
     
     st.markdown("---")
-    실행버튼 = st.button("🔍 실시간 스캔 및 분석 시작")
+    # ⭐️ 수정 포인트: 버튼 클릭 시 세션 상태를 변경하는 함수(on_click)를 호출합니다.
+    st.button("🔍 실시간 스캔 및 분석 시작", on_click=start_analysis)
 
 # ==========================================
 # 4. 분석 실행부
 # ==========================================
-if 실행버튼:
+# ⭐️ 수정 포인트: 단순 버튼 상태가 아닌, 고정된 세션 상태를 기준으로 실행합니다.
+if st.session_state.run_status:
     KST = timezone(timedelta(hours=9), name="KST")
     
-    # 요일 자동 계산
     weekday_idx = 지정_날짜.weekday()
     weekdays = ["월", "화", "수", "목", "금", "토", "일"]
     weekday_str = weekdays[weekday_idx]
@@ -73,20 +78,16 @@ if 실행버튼:
     elif weekday_idx >= 5: day_weight, day_desc = 0.8, f"{weekday_str}요일 (주말 한산함)"
     else: day_weight, day_desc = 1.0, f"{weekday_str}요일 (일반 평일)"
 
-    # 시간 범위 설정
     st_hour, st_min = 탐색_시작시간.hour, 탐색_시작시간.minute
     ed_hour, ed_min = 탐색_종료시간.hour, 탐색_종료시간.minute
     start_dt = datetime(지정_날짜.year, 지정_날짜.month, 지정_날짜.day, st_hour, st_min)
     end_dt = datetime(지정_날짜.year, 지정_날짜.month, 지정_날짜.day, ed_hour, ed_min)
     if end_dt < start_dt: end_dt += timedelta(days=1)
 
-    # 날씨 수집
     current_weather, base_weather_weight = get_realtime_weather()
     
-    # 상단 상태 메시지
     st.info(f"📅 **분석 기준일:** {지정_날짜.strftime('%Y년 %m월 %d일')} | {day_desc} \n\n📡 **실시간 기상:** {current_weather} (가중치: {base_weather_weight})")
     
-    # 진행 상태바
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -97,7 +98,6 @@ if 실행버튼:
     total_steps = int((end_dt - start_dt).total_seconds() / 60) + 1
     step_count = 0
 
-    # 시뮬레이션 계산
     while current <= end_dt:
         step_count += 1
         progress_bar.progress(step_count / total_steps)
@@ -126,7 +126,6 @@ if 실행버튼:
 
     df_all = pd.DataFrame(options).sort_values(["score", "duration_min"]).reset_index(drop=True)
 
-    # 10분 요약 로직
     def make_window(dt):
         st_time = dt.replace(minute=(dt.minute // 10) * 10)
         return f"{st_time.strftime('%H:%M')}~{(st_time + timedelta(minutes=9)).strftime('%H:%M')}"
@@ -142,7 +141,7 @@ if 실행버튼:
     display_df['기상상황'] = current_weather
 
     # ==========================================
-    # 5. 결과 화면 출력 (표, 차트, 지도)
+    # 5. 결과 화면 출력 
     # ==========================================
     col1, col2 = st.columns([1, 1])
     
@@ -151,7 +150,6 @@ if 실행버튼:
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
         st.subheader("📈 1분 단위 소요시간 추이")
-        # 클라우드 한글 깨짐 방지를 위해 스트림릿 자체 차트 활용
         chart_data = df_all.pivot(index='departure_time', columns='route_name', values='duration_min')
         st.line_chart(chart_data)
 
