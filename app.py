@@ -29,10 +29,10 @@ def start_dinner(): st.session_state.run_dinner = True
 KAKAO_API_KEY = "df68bf65618592b6d685caec6521432f"
 
 # ==========================================
-# 2. 공통 함수
+# 2. 핵심 로직 함수
 # ==========================================
 def get_lat_lon(address):
-    geolocator = Nominatim(user_agent="traffic_system_v6")
+    geolocator = Nominatim(user_agent="traffic_system_v7")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
@@ -80,6 +80,23 @@ def get_real_road_path(waypoints):
         return polyline.decode(res['routes'][0]['geometry'])
     except:
         return waypoints 
+
+def get_kakao_restaurants(lat, lon, radius_m):
+    """지정된 반경(m) 내에서 카카오 알고리즘 추천 순으로 맛집 데이터를 수집합니다."""
+    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+    headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+    params = {
+        "query": "맛집", 
+        "x": str(lon), 
+        "y": str(lat), 
+        "radius": int(radius_m), 
+        "sort": "accuracy"
+    }
+    try:
+        res = requests.get(url, headers=headers, params=params).json()
+        return res.get('documents', [])[:5]
+    except:
+        return []
 
 # ==========================================
 # 3. 사이드바 메뉴 제어
@@ -189,6 +206,10 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
         b1, b2 = st.columns(2)
         if b1.button("➕ 인원 추가"): st.session_state.num_people += 1
         if b2.button("➖ 인원 감소") and st.session_state.num_people > 2: st.session_state.num_people -= 1
+        
+        st.markdown("---")
+        # 동적 탐색 반경 조절 변수 슬라이더 배치
+        search_radius = st.slider("🎯 맛집 탐색 반경 설정 (m)", min_value=100, max_value=2000, value=300, step=100)
 
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -214,7 +235,6 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
                         time.sleep(0.3)
                     
                     if valid_locations:
-                        # 1. 지리적 무게중심 및 9개 그리드 생성
                         avg_lat = sum(l["lat"] for l in valid_locations) / len(valid_locations)
                         avg_lon = sum(l["lon"] for l in valid_locations) / len(valid_locations)
                         
@@ -225,22 +245,25 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
                             for j in range(3):
                                 candidates.append((avg_lat - lat_off + (2 * lat_off * i / 2), avg_lon - lon_off + (2 * lon_off * j / 2)))
                         
-                        # 2. OSRM API로 소요시간 매트릭스 계산
                         sources = [(l["lat"], l["lon"]) for l in valid_locations]
                         coords = sources + candidates
                         coord_str = ";".join([f"{lon},{lat}" for lat, lon in coords])
                         src_str = ";".join(map(str, range(len(sources))))
                         dst_str = ";".join(map(str, range(len(sources), len(coords))))
                         
-                        res = requests.get(f"http://router.project-osrm.org/table/v1/driving/{coord_str}?sources={src_str}&destinations={dst_str}").json()
-                        durations = res.get('durations', [])
+                        try:
+                            res = requests.get(f"http://router.project-osrm.org/table/v1/driving/{coord_str}?sources={src_str}&destinations={dst_str}").json()
+                            durations = res.get('durations', [])
+                        except:
+                            durations = []
                         
                         best_idx, min_max_time, best_times = 0, float('inf'), []
-                        for d_idx in range(len(candidates)):
-                            times = [durations[s_idx][d_idx] for s_idx in range(len(sources))]
-                            if None in times: continue
-                            if max(times) < min_max_time:
-                                min_max_time, best_idx, best_times = max(times), d_idx, times
+                        if durations:
+                            for d_idx in range(len(candidates)):
+                                times = [durations[s_idx][d_idx] for s_idx in range(len(sources))]
+                                if None in times: continue
+                                if max(times) < min_max_time:
+                                    min_max_time, best_idx, best_times = max(times), d_idx, times
                                 
                         b_lat, b_lon = candidates[best_idx]
                         
@@ -250,27 +273,26 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
                             for idx, col in enumerate(t_cols):
                                 col.metric(valid_locations[idx]["name"], f"약 {int(best_times[idx]//60)}분")
                         
-                        # 3. 카카오맵 맛집 데이터 호출
-                        rests = requests.get("https://dapi.kakao.com/v2/local/search/keyword.json", headers={"Authorization": f"KakaoAK {KAKAO_API_KEY}"}, params={"query": "맛집", "x": b_lon, "y": b_lat, "radius": 1500}).json().get('documents', [])[:5]
+                        # 3. 설정된 동적 반경을 전달하여 카카오맵 맛집 데이터 호출
+                        rests = get_kakao_restaurants(b_lat, b_lon, search_radius)
                         
-                        # 4. 지도 렌더링 및 300m 반경 시각화 ⭐️
+                        # 4. 지도 렌더링 및 동적 반경 시각화 (설정된 반경과 투명도 70% 적용)
                         m = folium.Map(location=[b_lat, b_lon], zoom_start=14, tiles='CartoDB Positron')
                         
-                        # 참석자 라인 그리기
                         for l in valid_locations:
                             folium.Marker([l["lat"], l["lon"]], popup=l["name"]).add_to(m)
                             folium.PolyLine([[l["lat"], l["lon"]], [b_lat, b_lon]], color="gray", weight=2, dash_array='5, 5').add_to(m)
                         
-                        # 최적 지점 및 300m 반경 원 그리기 (투명도 70% -> opacity 0.3)
+                        # 입력받은 반경에 맞춰 원형 인디케이터 투명도 70% (fill_opacity=0.3)로 드로잉
                         folium.Circle(
                             location=[b_lat, b_lon],
-                            radius=300,
+                            radius=int(search_radius),
                             color='#0052cc',
                             fill=True,
                             fill_color='#0052cc',
                             fill_opacity=0.3,
                             weight=2,
-                            tooltip="최적 추천 반경 300m"
+                            tooltip=f"추천 탐색 반경 {search_radius}m"
                         ).add_to(m)
                         
                         folium.Marker([b_lat, b_lon], popup="최적 중심점", icon=folium.Icon(color='red', icon='star')).add_to(m)
@@ -280,8 +302,8 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
                         
                         st_folium(m, width=700, height=450, key="map_dinner")
                         
-                        # 5. 맛집 Top 5 데이터프레임 표 출력 ⭐️
-                        st.markdown("### 🍽️ AI 추천 반경 내 맛집 Top 5")
+                        # 5. 맛집 Top 5 데이터프레임 표 출력
+                        st.markdown(f"### 🍽️ AI 추천 반경 {search_radius}m 내 맛집 Top 5 (카카오 인지도순)")
                         if rests:
                             rest_data = []
                             for i, r in enumerate(rests):
@@ -291,19 +313,17 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
                                     "식당 이름": r['place_name'],
                                     "음식 종류": category,
                                     "상세 주소": r['road_address_name'],
-                                    "메뉴 및 가격 확인": r['place_url'] # 링크 컬럼
+                                    "메뉴 및 가격 확인": r['place_url']
                                 })
                             
                             df_rests = pd.DataFrame(rest_data)
-                            
-                            # Streamlit의 column_config를 사용해 표 안에 클릭 가능한 링크 생성
                             st.dataframe(
                                 df_rests,
                                 column_config={
-                                    "메뉴 및 가격 확인": st.column_config.LinkColumn("🔗 카카오맵 바로가기")
+                                    "메뉴 및 가격 확인": st.column_config.LinkColumn("🔗 카카오맵에서 보기")
                                 },
                                 hide_index=True,
                                 use_container_width=True
                             )
                         else:
-                            st.info("해당 지점 주변에 검색된 맛집이 없습니다.")
+                            st.info(f"선택하신 반경 {search_radius}m 내에 검색된 맛집이 없습니다. 사이드바에서 반경을 넓혀보십시오.")
