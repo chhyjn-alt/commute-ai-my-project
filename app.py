@@ -25,14 +25,14 @@ if 'num_people' not in st.session_state:
 def start_commute(): st.session_state.run_commute = True
 def start_dinner(): st.session_state.run_dinner = True
 
-# 카카오 API 키
+# 카카오 REST API 키 고정
 KAKAO_API_KEY = "df68bf65618592b6d685caec6521432f"
 
 # ==========================================
 # 2. 핵심 로직 함수
 # ==========================================
 def get_lat_lon(address):
-    geolocator = Nominatim(user_agent="traffic_system_v7")
+    geolocator = Nominatim(user_agent="traffic_system_v8")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
@@ -82,15 +82,15 @@ def get_real_road_path(waypoints):
         return waypoints 
 
 def get_kakao_restaurants(lat, lon, radius_m):
-    """지정된 반경(m) 내에서 카카오 알고리즘 추천 순으로 맛집 데이터를 수집합니다."""
-    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+    """카카오 카테고리 검색 API(FD6: 음식점)를 호출하여 인기순(별점 지표 반영) 데이터 5개를 추출합니다."""
+    url = "https://dapi.kakao.com/v2/local/search/category.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
     params = {
-        "query": "맛집", 
+        "category_group_code": "FD6", 
         "x": str(lon), 
         "y": str(lat), 
         "radius": int(radius_m), 
-        "sort": "accuracy"
+        "sort": "popularity"
     }
     try:
         res = requests.get(url, headers=headers, params=params).json()
@@ -208,8 +208,8 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
         if b2.button("➖ 인원 감소") and st.session_state.num_people > 2: st.session_state.num_people -= 1
         
         st.markdown("---")
-        # 동적 탐색 반경 조절 변수 슬라이더 배치
-        search_radius = st.slider("🎯 맛집 탐색 반경 설정 (m)", min_value=100, max_value=2000, value=300, step=100)
+        # 동적 탐색 반경 설정 슬라이더
+        search_radius = st.slider("🎯 맛집 탐색 반경 설정 (m)", min_value=100, max_value=2000, value=500, step=100)
 
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -273,17 +273,16 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
                             for idx, col in enumerate(t_cols):
                                 col.metric(valid_locations[idx]["name"], f"약 {int(best_times[idx]//60)}분")
                         
-                        # 3. 설정된 동적 반경을 전달하여 카카오맵 맛집 데이터 호출
+                        # 카테고리 검색 기반 맛집 데이터 수집
                         rests = get_kakao_restaurants(b_lat, b_lon, search_radius)
                         
-                        # 4. 지도 렌더링 및 동적 반경 시각화 (설정된 반경과 투명도 70% 적용)
                         m = folium.Map(location=[b_lat, b_lon], zoom_start=14, tiles='CartoDB Positron')
                         
                         for l in valid_locations:
                             folium.Marker([l["lat"], l["lon"]], popup=l["name"]).add_to(m)
                             folium.PolyLine([[l["lat"], l["lon"]], [b_lat, b_lon]], color="gray", weight=2, dash_array='5, 5').add_to(m)
                         
-                        # 입력받은 반경에 맞춰 원형 인디케이터 투명도 70% (fill_opacity=0.3)로 드로잉
+                        # 반경 원형 인디케이터 투명도 70% 반영
                         folium.Circle(
                             location=[b_lat, b_lon],
                             radius=int(search_radius),
@@ -302,17 +301,22 @@ elif 선택메뉴 == "회식장소 최적위치 산출기":
                         
                         st_folium(m, width=700, height=450, key="map_dinner")
                         
-                        # 5. 맛집 Top 5 데이터프레임 표 출력
-                        st.markdown(f"### 🍽️ AI 추천 반경 {search_radius}m 내 맛집 Top 5 (카카오 인지도순)")
+                        st.markdown(f"### 🍽️ AI 추천 반경 {search_radius}m 내 인기 맛집 Top 5")
                         if rests:
                             rest_data = []
                             for i, r in enumerate(rests):
                                 category = r.get('category_name', '').split('>')[-1].strip()
+                                
+                                # 도로명 주소가 누락되었을 경우 지번 주소로 대체하는 안정화 로직
+                                addr = r.get('road_address_name', '').strip()
+                                if not addr:
+                                    addr = r.get('address_name', '주소 정보 없음')
+                                    
                                 rest_data.append({
                                     "순위": f"{i+1}위",
                                     "식당 이름": r['place_name'],
                                     "음식 종류": category,
-                                    "상세 주소": r['road_address_name'],
+                                    "상세 주소": addr,
                                     "메뉴 및 가격 확인": r['place_url']
                                 })
                             
