@@ -1,7 +1,7 @@
 import math
 import random
 import requests
-import pandas as pd  # 누락되었던 라이브러리 선언 추가
+import pandas as pd
 import streamlit as st
 import folium
 import time
@@ -20,7 +20,7 @@ if 'run_status' not in st.session_state:
 def start_analysis():
     st.session_state.run_status = True
 
-# 발급받은 카카오 API 키 고정
+# 카카오 REST API 키 고정
 KAKAO_API_KEY = "df68bf65618592b6d685caec6521432f"
 
 # ==========================================
@@ -28,12 +28,27 @@ KAKAO_API_KEY = "df68bf65618592b6d685caec6521432f"
 # ==========================================
 def get_lat_lon(address):
     """주소를 위도, 경도로 변환합니다."""
-    geolocator = Nominatim(user_agent="traffic_predictor_v3")
+    geolocator = Nominatim(user_agent="traffic_predictor_v4")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
     except:
         return None, None
+
+def get_realtime_weather_and_temp():
+    """Open-Meteo API를 통해 현재 기상 상황과 온도를 수집합니다."""
+    try:
+        res = requests.get("https://api.open-meteo.com/v1/forecast?latitude=36.8065&longitude=127.1522&current_weather=true&timezone=auto", timeout=5).json()
+        code = res['current_weather']['weathercode']
+        temp = res['current_weather']['temperature']
+        
+        if code in [0, 1, 2, 3]: desc = "맑음/구름"
+        elif code in [51, 53, 55, 61, 63, 65, 80, 81, 82]: desc = "비 (강수)"
+        elif code in [71, 73, 75, 85, 86]: desc = "눈 (결빙)"
+        else: desc = "기타"
+        return desc, temp
+    except:
+        return "수집 실패", 20.0
 
 def get_kakao_navi_baseline(origin_lat, origin_lon, dest_lat, dest_lon):
     """카카오 API를 통해 '현재 시각' 기준의 실시간 소요 시간과 거리를 가져옵니다."""
@@ -61,48 +76,11 @@ def get_kakao_navi_baseline(origin_lat, origin_lon, dest_lat, dest_lon):
         pass
     return None, None, []
 
-def predict_future_intervals(baseline_duration, start_time, end_time):
-    """실시간 수집된 소요시간을 기준으로 시간대별 정체 가중치를 적용하여 미래 소요시간을 산출합니다."""
-    now = datetime.now()
-    current_hour_val = now.hour + now.minute / 60.0
-    
-    # 현재 시점의 정체 지수 계산 (18:15분 피크 가우시안 모델)
-    if current_hour_val <= 18.25:
-        current_peak = math.exp(-((current_hour_val - 18.25) ** 2) / 0.04)
-    else:
-        current_peak = math.exp(-((current_hour_val - 18.25) ** 2) / 0.12)
-        
-    # 기본 주행 시간 역산 (정체가 전혀 없을 때의 예측 소요 시간)
-    base_drive_time = baseline_duration / (1.0 + current_peak * 1.2)
-    
-    options = []
-    current = start_time
-    
-    while current <= end_time:
-        hour_val = current.hour + current.minute / 60.0
-        
-        # 타겟 시간의 정체 지수 계산
-        if hour_val <= 18.25:
-            target_peak = math.exp(-((hour_val - 18.25) ** 2) / 0.04)
-        else:
-            target_peak = math.exp(-((hour_val - 18.25) ** 2) / 0.12)
-            
-        # 미래 특정 시점의 최종 예측 소요 시간 도출
-        predicted_duration = base_drive_time * (1.0 + target_peak * 1.2)
-        
-        options.append({
-            "출발 시간": current.strftime("%H:%M"),
-            "예상 소요 시간 (분)": round(predicted_duration, 1)
-        })
-        current += timedelta(minutes=10) # 10분 단위 구간 산출
-        
-    return pd.DataFrame(options)
-
 # ==========================================
 # 3. 화면 UI 및 컨트롤러
 # ==========================================
 st.title("🚗 카카오 실시간 연동형 퇴근시간 최적화 AI")
-st.markdown("카카오 모빌리티의 현재 실시간 소요 시간을 기준점 삼아, 퇴근 시간대(17:30~19:00)의 10분 단위 정체 추이를 예측 및 산출합니다.")
+st.markdown("카카오 모빌리티 실시간 데이터를 앵커 삼아 1분 단위로 교통 흐름을 시뮬레이션한 후, 매 10분 구간 내 최적의 결과를 산출합니다.")
 
 with st.sidebar:
     st.header("⚙️ 분석 설정")
@@ -114,13 +92,13 @@ with st.sidebar:
     탐색_종료 = st.time_input("탐색 종료시간", datetime.strptime("19:00", "%H:%M").time())
     
     st.markdown("---")
-    st.button("🔍 실시간 동기화 및 미래 예측 실행", on_click=start_analysis, type="primary", use_container_width=True)
+    st.button("🔍 1분 단위 정밀 스캔 및 미래 예측 실행", on_click=start_analysis, type="primary", use_container_width=True)
 
 # ==========================================
 # 4. 데이터 처리 및 시각화 출력
 # ==========================================
 if st.session_state.run_status:
-    with st.spinner("카카오 실시간 교통량 파싱 및 시간대별 최적화 알고리즘 구동 중..."):
+    with st.spinner("카카오 실시간 교통량 반영 및 1분 단위 고밀도 정밀 연산 중..."):
         
         # 1. 주소 -> 좌표 변환
         origin_lat, origin_lon = get_lat_lon(출발지)
@@ -129,28 +107,105 @@ if st.session_state.run_status:
         if not origin_lat or not dest_lat:
             st.error("주소 해석에 실패했습니다. 정확한 도로명 주소 형식인지 확인하십시오.")
         else:
-            # 2. 현재 기준 카카오 실시간 데이터 확보
-            distance, current_duration, path_coords = get_kakao_navi_baseline(origin_lat, origin_lon, dest_lat, dest_lon)
+            # 2. 현재 기준 실시간 데이터 및 기상 데이터 수집
+            distance_base, duration_base, path_coords = get_kakao_navi_baseline(origin_lat, origin_lon, dest_lat, dest_lon)
+            weather_desc, temperature = get_realtime_weather_and_temp()
             
-            if current_duration:
-                st.success(f"📡 카카오 실시간 교통 정보 동기화 완료 (현재 소요 시간: {int(current_duration)}분 / 주행 거리: {distance}km)")
+            if duration_base:
+                st.success(f"📡 데이터 동기화 완료 | 실시간 소요시간: {int(duration_base)}분 | 기상: {weather_desc} ({temperature}°C)")
                 
-                # 3. 10분 단위 구간 예측 데이터 프레임 생성
+                # 3. 1분 단위 고밀도 가우시안 시뮬레이션
+                now = datetime.now()
+                current_hour_val = now.hour + now.minute / 60.0
+                
+                if current_hour_val <= 18.25:
+                    current_peak = math.exp(-((current_hour_val - 18.25) ** 2) / 0.04)
+                else:
+                    current_peak = math.exp(-((current_hour_val - 18.25) ** 2) / 0.12)
+                
+                # 기준 경로 주행 시간 역산
+                base_drive_time_A = duration_base / (1.0 + current_peak * 1.2)
+                base_drive_time_B = base_drive_time_A * 1.15  # 우회 도로는 약 15% 기본 소요시간 김
+                
                 today = datetime.today()
                 start_dt = datetime(today.year, today.month, today.day, 탐색_시작.hour, 탐색_시작.minute)
                 end_dt = datetime(today.year, today.month, today.day, 탐색_종료.hour, 탐색_종료.minute)
                 
-                df_intervals = predict_future_intervals(current_duration, start_dt, end_dt)
+                options = []
+                current = start_dt
+                random.seed(int(start_dt.timestamp()))
                 
-                # 4. 화면 분할 레이아웃 출력
+                # 1분 단위 루프 생성
+                while current <= end_dt:
+                    hour_val = current.hour + current.minute / 60.0
+                    
+                    # 시간대별 정체 지수 산출
+                    if hour_val <= 18.25:
+                        peak = math.exp(-((hour_val - 18.25) ** 2) / 0.04)
+                    else:
+                        peak = math.exp(-((hour_val - 18.25) ** 2) / 0.12)
+                    
+                    noise = random.uniform(-1.0, 1.5)
+                    
+                    # 경로A(번영로) 및 경로B(우회도로)의 정체 민감도 차별 적용
+                    dur_A = base_drive_time_A * (1.0 + peak * 1.2) + noise
+                    dur_B = base_drive_time_B * (1.0 + peak * 0.3) + (noise * 0.5)
+                    
+                    # 선호 시간 패널티 적용 (18시 10분 최적 타겟팅 가중치)
+                    diff_minutes = abs((current.hour * 60 + current.minute) - (18 * 60 + 10))
+                    penalty = (diff_minutes ** 1.2) * 0.05
+                    
+                    options.append({
+                        "departure_time": current.strftime("%H:%M"),
+                        "dt_obj": current,
+                        "route_name": "경로A (번영로)",
+                        "distance_km": round(distance_base, 1),
+                        "duration_min": round(dur_A, 1),
+                        "score": round(dur_A + penalty, 2)
+                    })
+                    options.append({
+                        "departure_time": current.strftime("%H:%M"),
+                        "dt_obj": current,
+                        "route_name": "경로B (우회도로)",
+                        "distance_km": round(distance_base * 1.15, 1),
+                        "duration_min": round(dur_B, 1),
+                        "score": round(dur_B + penalty, 2)
+                    })
+                    current += timedelta(minutes=1)
+                
+                df_all = pd.DataFrame(options)
+                
+                # 4. 10분 구간 그룹라이징 및 최적값 추출 로직
+                def make_window(dt):
+                    st_time = dt.replace(minute=(dt.minute // 10) * 10)
+                    return f"{st_time.strftime('%H:%M')}~{(st_time + timedelta(minutes=9)).strftime('%H:%M')}"
+                
+                df_all['10분구간'] = df_all['dt_obj'].apply(make_window)
+                
+                # 10분 구간 내에서 스코어가 가장 낮은(최적인) 1분 단위 행 선택
+                summary = df_all.sort_values(["10분구간", "score"]).groupby("10분구간", as_index=False).first()
+                
+                # 데이터 프레임 정리 및 출력 항목 매핑
+                display_df = summary[["10분구간", "departure_time", "route_name", "duration_min", "distance_km"]].rename(
+                    columns={
+                        "departure_time": "최적 출발시간",
+                        "route_name": "최고의 경로",
+                        "duration_min": "소요시간 (분)",
+                        "distance_km": "거리 (km)"
+                    }
+                )
+                display_df["날씨"] = weather_desc
+                display_df["온도"] = f"{temperature} °C"
+                
+                # 5. 화면 분할 레이아웃 시각화
                 col1, col2 = st.columns([1, 1])
                 
                 with col1:
-                    st.subheader("⏰ 10분 구간별 최적 출발시간 예측 표")
-                    st.dataframe(df_intervals, use_container_width=True, hide_index=True)
+                    st.subheader("⏰ 10분 구간별 최적 출발 분 및 경로 산출")
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
                     
-                    st.subheader("📈 퇴근 시간대별 소요 시간 변동 추이")
-                    chart_data = df_intervals.set_index("출발 시간")
+                    st.subheader("📈 1분 단위 전수조사 소요시간 추이 그래프")
+                    chart_data = df_all.pivot(index='departure_time', columns='route_name', values='duration_min')
                     st.line_chart(chart_data)
                     
                 with col2:
@@ -161,6 +216,6 @@ if st.session_state.run_status:
                     folium.Marker([dest_lat, dest_lon], popup="목적지", icon=folium.Icon(color='red', icon='stop')).add_to(m)
                     folium.PolyLine(locations=path_coords, color='#ffc107', weight=6, tooltip="실시간 경로").add_to(m)
                     
-                    st_folium(m, width=700, height=520, key="map_hybrid")
+                    st_folium(m, width=700, height=520, key="map_ 정밀")
             else:
-                st.error("카카오 내비 서버와의 통신 리턴값이 비어있습니다. API 한도 또는 네트워크 상태를 확인하십시오.")
+                st.error("카카오 내비 서버 응답을 처리하지 못했습니다. 주소명 혹은 API 상태를 재검증하십시오.")
