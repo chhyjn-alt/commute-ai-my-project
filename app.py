@@ -1,6 +1,7 @@
 import math
 import random
 import requests
+import pandas as pd  # 누락되었던 라이브러리 선언 추가
 import streamlit as st
 import folium
 import time
