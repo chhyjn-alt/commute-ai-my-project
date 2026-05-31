@@ -26,11 +26,11 @@ str_kakao_rest_key = "df68bf65618592b6d685caec6521432f"
 str_kakao_js_key = "165629b32a8ebc5fee6b3ed48e6d708b"
 
 # ==========================================
-# 2. 캐싱 로직 및 네트워크 API 정의
+# 2. 핵심 네트워크 API 정의
 # ==========================================
 @st.cache_data
 def get_lat_lon(address):
-    geolocator = Nominatim(user_agent="happy_work_final_system_v4")
+    geolocator = Nominatim(user_agent="happy_work_final_system_v5")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
@@ -85,7 +85,7 @@ def get_kakao_restaurants(lat, lon, radius_m):
         res = requests.get(url, headers=headers, params=params).json()
         docs = res.get('documents', [])
         
-        # [문제 해결 1] 설정 반경 내 데이터가 없을 경우(강/산 등), 탐색 반경 20km 확장 및 거리순 강제 정렬
+        # 설정 반경 내 데이터가 없을 경우 탐색 반경 20km 확장 및 거리순 정렬 전환
         if not docs:
             params['radius'] = 20000
             params['sort'] = 'distance'
@@ -95,7 +95,7 @@ def get_kakao_restaurants(lat, lon, radius_m):
     except: return []
 
 # ==========================================
-# 3. 사이드바 메인 내비게이션
+# 3. 사이드바 내비게이션
 # ==========================================
 with st.sidebar:
     st.header("⚙️ 시스템 메인 메뉴")
@@ -206,7 +206,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
         if st.button("🔍 최적 위치 및 맛집 복합 산출", type="primary", use_container_width=True):
             if len(addresses) < 2: st.warning("최소 2명 이상의 주소가 필요합니다.")
             else:
-                with st.spinner("가장 공평한 지리적 중심점 및 실시간 맛집 스캔 중..."):
+                with st.spinner("지리적 중심점 계산 및 주변 맛집 탐색 중..."):
                     valid_locations = []
                     for p in addresses:
                         lat, lon = get_lat_lon(p["address"])
@@ -289,8 +289,8 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                         "음식 종류": r.get('category_name', '').split('>')[-1].strip(),
                         "상세 주소": addr, "링크 정보": r['place_url']
                     })
-                st.dataframe(pd.DataFrame(rest_list), column_config={"링크 정보": st.column_config.LinkColumn("🔗 카카오맵으로 열기")}, hide_index=True, use_container_width=True)
-            else: st.info("탐색 불가 지역(강/산 등)으로 판별되었습니다. 출발지를 재조정하십시오.")
+                st.dataframe(pd.DataFrame(rest_list), column_config={"リンク 정보": st.column_config.LinkColumn("🔗 카카오맵으로 열기")}, hide_index=True, use_container_width=True)
+            else: st.info("탐색 불가 지역입니다. 출발지를 재조정하십시오.")
 
 # ==========================================
 # 6. 모듈 3: 출발 알리미
@@ -326,9 +326,8 @@ elif 선택메뉴 == "3. 출발 알리미":
         if st.session_state.notify_data:
             n_res = st.session_state.notify_data
             
-            # [문제 해결 2] 스트림릿 가상 iframe 도메인 자동 검출 및 Fail-safe 텍스트 블록
             st.code(f"[출발 알림]\n지금 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(약 {n_res['dur']}분 소요 예상)", language="text")
-            st.info("API 에러(4019) 지속 시, 위 텍스트 창 우측 상단의 복사 버튼을 사용하여 전송할 수 있습니다.")
+            st.info("API 에러(4019) 발생 시, 위 텍스트 창 우측 상단의 복사 버튼을 사용하여 전송할 수 있습니다.")
             
             kakao_js_code = f"""
             <script src="https://t1.kakaocdn.net/kakao_js_sdk/2.7.0/kakao.min.js"></script>
@@ -351,8 +350,8 @@ elif 선택메뉴 == "3. 출발 알리미":
             </script>
             <div style="text-align: center; margin-top: 10px; border: 1px solid #ddd; padding: 10px; border-radius: 8px;">
                 <p style="font-family:sans-serif; color:red; font-size:12px; margin-bottom:5px;">
-                    ※ 에러 4019 발생 원인: 스트림릿 보안에 의해 생성된 아래의 동적 도메인이 카카오에 등록되지 않았습니다.<br>
-                    정상 작동을 원하시면 카카오 디벨로퍼스 [Web] 메뉴에 아래의 도메인을 반드시 추가하십시오.
+                    ※ 에러 4019 발생 시, 스트림릿 보안에 의해 생성된 아래의 동적 도메인이 카카오에 등록되지 않은 것입니다.<br>
+                    정상 작동을 원하시면 카카오 디벨로퍼스 [Web 플랫폼 등록] 메뉴에 아래의 도메인을 추가하십시오.
                 </p>
                 <p style="font-weight:bold; background:#f4f4f4; padding:8px; border-radius:4px; font-size:14px; margin-bottom:15px;" id="domain_info">도메인 추적 중...</p>
                 
