@@ -6,7 +6,6 @@ import streamlit as st
 import folium
 import time
 import polyline
-import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
@@ -23,14 +22,13 @@ if 'dinner_data' not in st.session_state: st.session_state.dinner_data = None
 if 'notify_data' not in st.session_state: st.session_state.notify_data = None
 
 str_kakao_rest_key = "df68bf65618592b6d685caec6521432f"
-str_kakao_js_key = "165629b32a8ebc5fee6b3ed48e6d708b"
 
 # ==========================================
 # 2. 핵심 네트워크 API 정의
 # ==========================================
 @st.cache_data
 def get_lat_lon(address):
-    geolocator = Nominatim(user_agent="happy_work_final_system_v5")
+    geolocator = Nominatim(user_agent="happy_work_final_system_v7")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
@@ -78,20 +76,14 @@ def get_real_road_path(waypoints):
     except: return waypoints 
 
 def get_kakao_restaurants(lat, lon, radius_m):
+    # 강제 반경 확장 로직 삭제. 사용자가 지정한 radius_m 값 내부만 정확히 탐색합니다.
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {str_kakao_rest_key}"}
     params = {"query": "맛집", "category_group_code": "FD6", "x": str(lon), "y": str(lat), "radius": int(radius_m), "sort": "accuracy"}
     try:
         res = requests.get(url, headers=headers, params=params).json()
         docs = res.get('documents', [])
-        
-        # 설정 반경 내 데이터가 없을 경우 탐색 반경 20km 확장 및 거리순 정렬 전환
-        if not docs:
-            params['radius'] = 20000
-            params['sort'] = 'distance'
-            res = requests.get(url, headers=headers, params=params).json()
-            docs = res.get('documents', [])
-        return docs[:5]
+        return docs[:5] # 지정 반경 내에서 찾은 최대 5개 반환 (없으면 빈 리스트)
     except: return []
 
 # ==========================================
@@ -278,7 +270,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                 folium.Marker([float(r['y']), float(r['x'])], popup=r['place_name'], icon=folium.Icon(color='orange', icon='cutlery')).add_to(m)
             st_folium(m, width=700, height=450, key="map_dinner_fixed")
             
-            st.markdown(f"### 🍽️ AI 추천 반경 내 최적 식당 Top 5")
+            st.markdown(f"### 🍽️ AI 추천 반경 {d_res['radius']}m 내 맛집 Top 5")
             if d_res["rests"]:
                 rest_list = []
                 for idx, r in enumerate(d_res["rests"]):
@@ -289,15 +281,17 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                         "음식 종류": r.get('category_name', '').split('>')[-1].strip(),
                         "상세 주소": addr, "링크 정보": r['place_url']
                     })
-                st.dataframe(pd.DataFrame(rest_list), column_config={"リンク 정보": st.column_config.LinkColumn("🔗 카카오맵으로 열기")}, hide_index=True, use_container_width=True)
-            else: st.info("탐색 불가 지역입니다. 출발지를 재조정하십시오.")
+                st.dataframe(pd.DataFrame(rest_list), column_config={"링크 정보": st.column_config.LinkColumn("🔗 카카오맵으로 열기")}, hide_index=True, use_container_width=True)
+            else: 
+                # 빈 결과값에 대한 명확한 UI 안내 메시지 적용
+                st.info(f"선택하신 반경({d_res['radius']}m) 내에 검색된 맛집이 없습니다. 탐색 반경을 더 넓히거나 출발지를 재조정해 보세요.")
 
 # ==========================================
 # 6. 모듈 3: 출발 알리미
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
-    st.title("💬 출발 알리미 (카카오톡 실시간 공유)")
-    st.markdown("도착 예정 시간(ETA)을 산출하고, 등록된 연락처로 알림을 전송합니다.")
+    st.title("💬 출발 알리미 (원클릭 메시지 생성기)")
+    st.markdown("카카오 내비 실시간 데이터를 기반으로 도착 예정 시간(ETA)을 계산하고, 즉시 전송 가능한 템플릿을 생성합니다.")
     
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -310,7 +304,7 @@ elif 선택메뉴 == "3. 출발 알리미":
             st.session_state.favorite_contact = contact_in
             st.success(f"[{contact_in}] 데이터가 시스템에 영구 등록되었습니다.")
             
-        if st.button("⏱️ 실시간 ETA 및 카카오톡 전송패널 생성", type="primary"):
+        if st.button("⏱️ 실시간 ETA 메시지 생성", type="primary"):
             o_lat, o_lon = get_lat_lon(출발지)
             d_lat, d_lon = get_lat_lon(목적지)
             if o_lat and d_lat:
@@ -322,43 +316,12 @@ elif 선택메뉴 == "3. 출발 알리미":
             else: st.error("주소 파싱 에러.")
 
     with col2:
-        st.subheader("📡 카카오톡 API 전송 제어 패널")
+        st.subheader("📋 카카오톡 전송용 최종 템플릿")
         if st.session_state.notify_data:
             n_res = st.session_state.notify_data
             
-            st.code(f"[출발 알림]\n지금 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(약 {n_res['dur']}분 소요 예상)", language="text")
-            st.info("API 에러(4019) 발생 시, 위 텍스트 창 우측 상단의 복사 버튼을 사용하여 전송할 수 있습니다.")
+            msg_text = f"[{n_res['target']}님께 보내는 출발 알림]\n지금 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(실시간 교통망 기준 약 {n_res['dur']}분 소요 예상)"
             
-            kakao_js_code = f"""
-            <script src="https://t1.kakaocdn.net/kakao_js_sdk/2.7.0/kakao.min.js"></script>
-            <script>
-              if (!Kakao.isInitialized()) {{ Kakao.init('{str_kakao_js_key}'); }}
-              function pushKakaoShare() {{
-                Kakao.Share.sendDefault({{
-                  objectType: 'text',
-                  text: '[출발 알림]\\n지금 출발합니다.\\n🚗 도착 예정 시간: {n_res["eta"]}\\n(약 {n_res["dur"]}분 소요)',
-                  link: {{
-                    mobileWebUrl: 'https://developers.kakao.com',
-                    webUrl: 'https://developers.kakao.com'
-                  }},
-                }});
-              }}
-              
-              window.onload = function() {{
-                  document.getElementById("domain_info").innerText = window.location.origin;
-              }}
-            </script>
-            <div style="text-align: center; margin-top: 10px; border: 1px solid #ddd; padding: 10px; border-radius: 8px;">
-                <p style="font-family:sans-serif; color:red; font-size:12px; margin-bottom:5px;">
-                    ※ 에러 4019 발생 시, 스트림릿 보안에 의해 생성된 아래의 동적 도메인이 카카오에 등록되지 않은 것입니다.<br>
-                    정상 작동을 원하시면 카카오 디벨로퍼스 [Web 플랫폼 등록] 메뉴에 아래의 도메인을 추가하십시오.
-                </p>
-                <p style="font-weight:bold; background:#f4f4f4; padding:8px; border-radius:4px; font-size:14px; margin-bottom:15px;" id="domain_info">도메인 추적 중...</p>
-                
-                <p style="font-family:sans-serif; color:#333; font-size:14px;">지정 대상: <b>{n_res["target"]}</b></p>
-                <button onclick="pushKakaoShare()" style="background:#FEE500; border:none; padding:15px 40px; border-radius:8px; cursor:pointer; font-weight:bold; font-size:16px; color:#3c1e1e;">
-                    💬 실제 카카오톡으로 전송하기
-                </button>
-            </div>
-            """
-            components.html(kakao_js_code, height=260)
+            st.code(msg_text, language="text")
+            st.success("위 텍스트 박스 우측 상단의 [복사 버튼(아이콘)]을 클릭한 뒤, 카카오톡 창에 붙여넣기(Ctrl+V) 하십시오.")
+            st.info("이 방식은 외부 API 보안 도메인 연동 과정을 거치지 않으므로 차단 에러가 절대 발생하지 않습니다.")
