@@ -11,9 +11,32 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 
 # ==========================================
-# 1. 페이지 및 세션 상태 초기화
+# 1. 페이지 설정 및 모바일 최적화 CSS 주입
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="wide")
+
+# 모바일 가로 스크롤 방지 및 폰트 크기 축소 CSS
+st.markdown("""
+    <style>
+    /* 헤더 및 타이틀 크기 모바일 최적화 */
+    h1, .st-emotion-cache-10trblm { font-size: 1.4rem !important; font-weight: bold !important; }
+    h2 { font-size: 1.2rem !important; }
+    h3 { font-size: 1.05rem !important; }
+    
+    /* 본문 컨테이너 여백 최소화로 가로 오버플로우 차단 */
+    .block-container {
+        padding-left: 0.6rem !important;
+        padding-right: 0.6rem !important;
+        padding-top: 1rem !important;
+        padding-bottom: 1rem !important;
+    }
+    
+    /* 데이터프레임 가로 너비 강제 고정 */
+    div[data-testid="stDataFrame"] {
+        width: 100% !important;
+    }
+    </style>
+""", unsafe_allow_code=True)
 
 if 'num_people' not in st.session_state: st.session_state.num_people = 3
 if 'favorite_contact' not in st.session_state: st.session_state.favorite_contact = ""
@@ -28,7 +51,7 @@ str_kakao_rest_key = "df68bf65618592b6d685caec6521432f"
 # ==========================================
 @st.cache_data
 def get_lat_lon(address):
-    geolocator = Nominatim(user_agent="happy_work_final_system_v7")
+    geolocator = Nominatim(user_agent="happy_work_mobile_system_v1")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
@@ -76,38 +99,37 @@ def get_real_road_path(waypoints):
     except: return waypoints 
 
 def get_kakao_restaurants(lat, lon, radius_m):
-    # 강제 반경 확장 로직 삭제. 사용자가 지정한 radius_m 값 내부만 정확히 탐색합니다.
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {str_kakao_rest_key}"}
     params = {"query": "맛집", "category_group_code": "FD6", "x": str(lon), "y": str(lat), "radius": int(radius_m), "sort": "accuracy"}
     try:
         res = requests.get(url, headers=headers, params=params).json()
         docs = res.get('documents', [])
-        return docs[:5] # 지정 반경 내에서 찾은 최대 5개 반환 (없으면 빈 리스트)
+        return docs[:5]
     except: return []
 
 # ==========================================
 # 3. 사이드바 내비게이션
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ 시스템 메인 메뉴")
-    선택메뉴 = st.selectbox("실행할 프로그램 선택", ["1. 퇴근시간 최적화 AI", "2. 회식장소 최적위치 산출기", "3. 출발 알리미"])
-    st.markdown("---")
+    st.markdown("### ⚙️ 시스템 메뉴")
+    선택메뉴 = st.selectbox("프로그램 선택", ["1. 퇴근시간 최적화 AI", "2. 회식장소 최적위치 산출기", "3. 출발 알리미"])
 
 # ==========================================
 # 4. 모듈 1: 퇴근시간 최적화 AI
 # ==========================================
 if 선택메뉴 == "1. 퇴근시간 최적화 AI":
-    st.title("🚗 카카오 실시간 연동형 퇴근시간 최적화 AI")
+    st.markdown("### 🚗 퇴근시간 최적화 AI")
+    
     with st.sidebar:
-        st.subheader("분석 범위 설정")
+        st.markdown("#### 범위 설정")
         출발지 = st.text_input("출발지 주소", "충청남도 아산시 탕정면 삼성로 1")
         목적지 = st.text_input("목적지 주소", "충청남도 천안시 동남구 성황로 40")
-        탐색_시작 = st.time_input("탐색 시작시간", datetime.strptime("17:30", "%H:%M").time())
-        탐색_종료 = st.time_input("탐색 종료시간", datetime.strptime("19:00", "%H:%M").time())
+        탐색_시작 = st.time_input("시작시간", datetime.strptime("17:30", "%H:%M").time())
+        탐색_종료 = st.time_input("종료시간", datetime.strptime("19:00", "%H:%M").time())
         
-        if st.button("🔍 1분 단위 고밀도 스캔 실행", type="primary", use_container_width=True):
-            with st.spinner("카카오 트래픽 데이터 동기화 및 시뮬레이션 중..."):
+        if st.button("🔍 고밀도 스캔 실행", type="primary", use_container_width=True):
+            with st.spinner("트래픽 분석 중..."):
                 o_lat, o_lon = get_lat_lon(출발지)
                 d_lat, d_lon = get_lat_lon(목적지)
                 if o_lat and d_lat:
@@ -150,55 +172,55 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
                         display_df["온도"] = f"{temp_val} °C"
                         
                         st.session_state.commute_data = {"df": display_df, "o_lat": o_lat, "o_lon": o_lon, "d_lat": d_lat, "d_lon": d_lon, "path_k": path_k}
-                    else: st.error("카카오 교통망 동기화 실패.")
+                    else: st.error("데이터 동기화 실패.")
                 else: st.error("주소 해석 불가.")
 
     if st.session_state.commute_data:
         c_res = st.session_state.commute_data
         col1, col2 = st.columns([1, 1])
         with col1:
-            st.subheader("⏰ 10분 구간별 최적 연산 결과")
+            st.markdown("#### ⏰ 최적 연산 결과")
             st.dataframe(c_res["df"], use_container_width=True, hide_index=True)
             selected_window = st.selectbox("🗺️ 지도 연동 구간 선택", c_res["df"]["10분구간"].tolist())
             target_route = c_res["df"][c_res["df"]["10분구간"] == selected_window].iloc[0]["최고의 경로"]
         with col2:
-            st.subheader(f"🗺️ 추천 최적 루트 시각화: {target_route}")
+            st.markdown(f"#### 🗺️ 최적 루트: {target_route}")
             m = folium.Map(location=[(c_res["o_lat"]+c_res["d_lat"])/2, (c_res["o_lon"]+c_res["d_lon"])/2], zoom_start=12, tiles='OpenStreetMap')
-            folium.Marker([c_res["o_lat"], c_res["o_lon"]], popup="출발지", icon=folium.Icon(color='blue')).add_to(m)
-            folium.Marker([c_res["d_lat"], c_res["d_lon"]], popup="목적지", icon=folium.Icon(color='red')).add_to(m)
+            folium.Marker([c_res["o_lat"], c_res["o_lon"]], popup="출발지").add_to(m)
+            folium.Marker([c_res["d_lat"], c_res["d_lon"]], popup="목적지").add_to(m)
             
             if "경로A" in target_route: folium.PolyLine(locations=c_res["path_k"], color='#dc3545', weight=6).add_to(m)
             else:
                 path_o = get_real_road_path([[c_res["o_lat"], c_res["o_lon"]], [36.8200, 127.1100], [c_res["d_lat"], c_res["d_lon"]]])
                 folium.PolyLine(locations=path_o, color='#28a745', weight=6).add_to(m)
-            st_folium(m, width=700, height=450, key="map_commute_fixed")
+            st_folium(m, use_container_width=True, height=380, key="map_commute_fixed")
 
 # ==========================================
 # 5. 모듈 2: 회식장소 최적위치 산출기
 # ==========================================
 elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
-    st.title("🍻 소요시간 밸런스 기반 회식장소 추천기")
+    st.markdown("### 🍻 회식장소 추천기")
     with st.sidebar:
-        st.subheader("매개변수 제어")
+        st.markdown("#### 참석 인원")
         b1, b2 = st.columns(2)
-        if b1.button("➕ 인원 추가"): st.session_state.num_people += 1
-        if b2.button("➖ 인원 감소") and st.session_state.num_people > 2: st.session_state.num_people -= 1
+        if b1.button("➕ 추가"): st.session_state.num_people += 1
+        if b2.button("➖ 감소") and st.session_state.num_people > 2: st.session_state.num_people -= 1
         st.markdown("---")
-        search_radius = st.slider("🎯 맛집 탐색 반경 설정 (m)", min_value=100, max_value=2000, value=500, step=100)
+        search_radius = st.slider("🎯 탐색 반경 (m)", min_value=100, max_value=2000, value=500, step=100)
 
-    col1, col2 = st.columns([1, 2])
+    col1, col2 = st.columns([1, 1])
     with col1:
-        st.subheader("👥 참석자 출발지 입력")
+        st.markdown("#### 👥 참석자 출발지")
         addresses = []
         for i in range(st.session_state.num_people):
             default_addr = ["서울특별시 강남구 역삼동", "서울특별시 마포구 서교동", "경기도 성남시 분당구 삼평동"][i] if i < 3 else ""
-            addr = st.text_input(f"참석자 {i+1} 출발지", value=default_addr, key=f"addr_d_{i}")
+            addr = st.text_input(f"참석자 {i+1} 주소", value=default_addr, key=f"addr_d_{i}")
             if addr.strip(): addresses.append({"name": f"참석자 {i+1}", "address": addr})
             
-        if st.button("🔍 최적 위치 및 맛집 복합 산출", type="primary", use_container_width=True):
+        if st.button("🔍 최적 위치 산출", type="primary", use_container_width=True):
             if len(addresses) < 2: st.warning("최소 2명 이상의 주소가 필요합니다.")
             else:
-                with st.spinner("지리적 중심점 계산 및 주변 맛집 탐색 중..."):
+                with st.spinner("중심점 연산 중..."):
                     valid_locations = []
                     for p in addresses:
                         lat, lon = get_lat_lon(p["address"])
@@ -246,14 +268,14 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                         }
 
     with col2:
-        st.subheader("🗺️ 분석 결과 대시보드")
+        st.markdown("#### 🗺️ 분석 결과")
         if st.session_state.dinner_data:
             d_res = st.session_state.dinner_data
             
+            # [가로 스크롤 차단] 가로 배열 컬럼 방식 대신 심플 텍스트 표기로 모바일 가로 찌그러짐 현상 해결
             if d_res["best_times"]:
-                t_cols = st.columns(len(d_res["valid_locations"]))
-                for idx, col in enumerate(t_cols):
-                    col.metric(d_res["valid_locations"][idx]["name"], f"약 {int(d_res['best_times'][idx]//60)}분")
+                for idx, loc in enumerate(d_res["valid_locations"]):
+                    st.markdown(f"⏱️ **{loc['name']} 소요시간**: 약 {int(d_res['best_times'][idx]//60)}분")
             
             m = folium.Map(location=[d_res["b_lat"], d_res["b_lon"]], zoom_start=14, tiles='OpenStreetMap')
             for l in d_res["valid_locations"]:
@@ -265,12 +287,12 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                 fill=True, fill_color='#0052cc', fill_opacity=0.3, weight=2
             ).add_to(m)
             
-            folium.Marker([d_res["b_lat"], d_res["b_lon"]], popup="최적 중심점", icon=folium.Icon(color='red', icon='star')).add_to(m)
+            folium.Marker([d_res["b_lat"], d_res["b_lon"]], popup="최적 중심점").add_to(m)
             for r in d_res["rests"]:
-                folium.Marker([float(r['y']), float(r['x'])], popup=r['place_name'], icon=folium.Icon(color='orange', icon='cutlery')).add_to(m)
-            st_folium(m, width=700, height=450, key="map_dinner_fixed")
+                folium.Marker([float(r['y']), float(r['x'])], popup=r['place_name']).add_to(m)
+            st_folium(m, use_container_width=True, height=380, key="map_dinner_fixed")
             
-            st.markdown(f"### 🍽️ AI 추천 반경 {d_res['radius']}m 내 맛집 Top 5")
+            st.markdown(f"##### 🍽️ 지정 반경 {d_res['radius']}m 내 맛집 Top 5")
             if d_res["rests"]:
                 rest_list = []
                 for idx, r in enumerate(d_res["rests"]):
@@ -278,33 +300,31 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                     if not addr: addr = r.get('address_name', '주소 정보 누락')
                     rest_list.append({
                         "순위": f"{idx+1}위", "식당 이름": r['place_name'],
-                        "음식 종류": r.get('category_name', '').split('>')[-1].strip(),
-                        "상세 주소": addr, "링크 정보": r['place_url']
+                        "종류": r.get('category_name', '').split('>')[-1].strip(),
+                        "주소": addr, "링크": r['place_url']
                     })
-                st.dataframe(pd.DataFrame(rest_list), column_config={"링크 정보": st.column_config.LinkColumn("🔗 카카오맵으로 열기")}, hide_index=True, use_container_width=True)
-            else: 
-                # 빈 결과값에 대한 명확한 UI 안내 메시지 적용
-                st.info(f"선택하신 반경({d_res['radius']}m) 내에 검색된 맛집이 없습니다. 탐색 반경을 더 넓히거나 출발지를 재조정해 보세요.")
+                st.dataframe(pd.DataFrame(rest_list), column_config={"링크": st.column_config.LinkColumn("🔗 지도")}, hide_index=True, use_container_width=True)
+            else:
+                st.info(f"지정한 반경({d_res['radius']}m) 내에 검색된 맛집이 없습니다. 탐색 반경을 넓혀보십시오.")
 
 # ==========================================
 # 6. 모듈 3: 출발 알리미
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
-    st.title("💬 출발 알리미 (원클릭 메시지 생성기)")
-    st.markdown("카카오 내비 실시간 데이터를 기반으로 도착 예정 시간(ETA)을 계산하고, 즉시 전송 가능한 템플릿을 생성합니다.")
+    st.markdown("### 💬 출발 알리미")
     
     col1, col2 = st.columns([1, 1])
     with col1:
-        st.subheader("경로 및 수신 설정")
+        st.markdown("#### 경로 및 수신 설정")
         출발지 = st.text_input("출발지 주소", "충청남도 아산시 탕정면 삼성로 1")
         목적지 = st.text_input("도착지 주소", "충청남도 천안시 동남구 성황로 40")
         
-        contact_in = st.text_input("수신자 이름/연락처 고정", value=st.session_state.favorite_contact, placeholder="예: 배우자")
-        if st.button("⭐️ 즐겨찾기 주소록 등록 및 변경"):
+        contact_in = st.text_input("수신자 이름", value=st.session_state.favorite_contact, placeholder="예: 배우자")
+        if st.button("⭐️ 즐겨찾기 등록", use_container_width=True):
             st.session_state.favorite_contact = contact_in
-            st.success(f"[{contact_in}] 데이터가 시스템에 영구 등록되었습니다.")
+            st.success("즐겨찾기로 등록되었습니다.")
             
-        if st.button("⏱️ 실시간 ETA 메시지 생성", type="primary"):
+        if st.button("⏱️ 실시간 ETA 메시지 생성", type="primary", use_container_width=True):
             o_lat, o_lon = get_lat_lon(출발지)
             d_lat, d_lon = get_lat_lon(목적지)
             if o_lat and d_lat:
@@ -312,16 +332,13 @@ elif 선택메뉴 == "3. 출발 알리미":
                 if dur:
                     eta_time = datetime.now() + timedelta(minutes=dur)
                     st.session_state.notify_data = {"eta": eta_time.strftime('%H시 %M분'), "dur": int(dur), "target": contact_in}
-                else: st.error("카카오 라우팅 API 에러.")
-            else: st.error("주소 파싱 에러.")
+                else: st.error("교통정보 획득 에러.")
+            else: st.error("주소 해석 에러.")
 
     with col2:
-        st.subheader("📋 카카오톡 전송용 최종 템플릿")
+        st.markdown("#### 📋 카카오톡 전송 템플릿")
         if st.session_state.notify_data:
             n_res = st.session_state.notify_data
-            
-            msg_text = f"[{n_res['target']}님께 보내는 출발 알림]\n지금 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(실시간 교통망 기준 약 {n_res['dur']}분 소요 예상)"
-            
+            msg_text = f"[{n_res['target']}님 출발 알림]\n지금 퇴근 후 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(실시간 교통량 기준 약 {n_res['dur']}분 소요 예상)"
             st.code(msg_text, language="text")
-            st.success("위 텍스트 박스 우측 상단의 [복사 버튼(아이콘)]을 클릭한 뒤, 카카오톡 창에 붙여넣기(Ctrl+V) 하십시오.")
-            st.info("이 방식은 외부 API 보안 도메인 연동 과정을 거치지 않으므로 차단 에러가 절대 발생하지 않습니다.")
+            st.success("우측 상단 복사 단추를 누르고 카카오톡 창에 붙여넣으십시오.")
