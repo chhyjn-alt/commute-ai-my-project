@@ -11,7 +11,7 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 
 # ==========================================
-# 1. 페이지 및 세션 상태 초기화 (CSS 충돌 블록 제거)
+# 1. 페이지 및 세션 상태 초기화
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
 
@@ -28,7 +28,7 @@ str_kakao_rest_key = "df68bf65618592b6d685caec6521432f"
 # ==========================================
 @st.cache_data
 def get_lat_lon(address):
-    geolocator = Nominatim(user_agent="happy_work_mobile_system_v2")
+    geolocator = Nominatim(user_agent="happy_work_mobile_system_v3")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
@@ -160,7 +160,8 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
         target_route = c_res["df"][c_res["df"]["10분구간"] == selected_window].iloc[0]["최고의 경로"]
         
         st.markdown(f"#### 🗺️ 최적 루트: {target_route}")
-        m = folium.Map(location=[(c_res["o_lat"]+c_res["d_lat"])/2, (c_res["o_lon"]+c_res["d_lon"])/2], zoom_start=12, tiles='OpenStreetMap')
+        # OSM 대신 모바일 WebView 친화적인 CartoDB 사용
+        m = folium.Map(location=[(c_res["o_lat"]+c_res["d_lat"])/2, (c_res["o_lon"]+c_res["d_lon"])/2], zoom_start=12, tiles='CartoDB positron')
         folium.Marker([c_res["o_lat"], c_res["o_lon"]], popup="출발지").add_to(m)
         folium.Marker([c_res["d_lat"], c_res["d_lon"]], popup="목적지").add_to(m)
         
@@ -249,7 +250,8 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             for idx, loc in enumerate(d_res["valid_locations"]):
                 st.markdown(f"⏱️ **{loc['name']} 소요시간**: 약 {int(d_res['best_times'][idx]//60)}분")
         
-        m = folium.Map(location=[d_res["b_lat"], d_res["b_lon"]], zoom_start=14, tiles='OpenStreetMap')
+        # OSM 대신 모바일 WebView 친화적인 CartoDB 사용
+        m = folium.Map(location=[d_res["b_lat"], d_res["b_lon"]], zoom_start=14, tiles='CartoDB positron')
         for l in d_res["valid_locations"]:
             folium.Marker([l["lat"], l["lon"]], popup=l["name"]).add_to(m)
             folium.PolyLine([[l["lat"], l["lon"]], [d_res["b_lat"], d_res["b_lon"]]], color="gray", weight=2, dash_array='5, 5').add_to(m)
@@ -312,4 +314,3 @@ elif 선택메뉴 == "3. 출발 알리미":
         msg_text = f"[{n_res['target']}님 출발 알림]\n지금 퇴근 후 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(실시간 교통량 기준 약 {n_res['dur']}분 소요 예상)"
         st.code(msg_text, language="text")
         st.success("우측 상단 복사 단추를 누르고 카카오톡 창에 붙여넣으십시오.")
-    
