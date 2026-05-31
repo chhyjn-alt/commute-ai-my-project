@@ -22,7 +22,6 @@ if 'commute_data' not in st.session_state: st.session_state.commute_data = None
 if 'dinner_data' not in st.session_state: st.session_state.dinner_data = None
 if 'notify_data' not in st.session_state: st.session_state.notify_data = None
 
-# 고정 API 키 설정
 str_kakao_rest_key = "df68bf65618592b6d685caec6521432f"
 str_kakao_js_key = "165629b32a8ebc5fee6b3ed48e6d708b"
 
@@ -31,12 +30,11 @@ str_kakao_js_key = "165629b32a8ebc5fee6b3ed48e6d708b"
 # ==========================================
 @st.cache_data
 def get_lat_lon(address):
-    geolocator = Nominatim(user_agent="happy_work_final_system_v3")
+    geolocator = Nominatim(user_agent="happy_work_final_system_v4")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
-    except:
-        return None, None
+    except: return None, None
 
 @st.cache_data
 def get_realtime_weather_and_temp():
@@ -49,8 +47,7 @@ def get_realtime_weather_and_temp():
         elif code in [71, 73, 75, 85, 86]: desc = "눈 (결빙)"
         else: desc = "기타"
         return desc, temp
-    except:
-        return "수집 실패", 20.0
+    except: return "수집 실패", 20.0
 
 @st.cache_data
 def get_kakao_navi_baseline(origin_lat, origin_lon, dest_lat, dest_lon):
@@ -69,8 +66,7 @@ def get_kakao_navi_baseline(origin_lat, origin_lon, dest_lat, dest_lon):
                     for i in range(0, len(road['vertexes']), 2):
                         path.append([road['vertexes'][i+1], road['vertexes'][i]])
             return round(dist, 1), round(dur, 1), path
-    except:
-        pass
+    except: pass
     return None, None, []
 
 def get_real_road_path(waypoints):
@@ -79,25 +75,24 @@ def get_real_road_path(waypoints):
     try:
         res = requests.get(url, timeout=5).json()
         return polyline.decode(res['routes'][0]['geometry'])
-    except:
-        return waypoints 
+    except: return waypoints 
 
 def get_kakao_restaurants(lat, lon, radius_m):
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {str_kakao_rest_key}"}
-    params = {
-        "query": "맛집",
-        "category_group_code": "FD6",
-        "x": str(lon), 
-        "y": str(lat), 
-        "radius": int(radius_m), 
-        "sort": "accuracy"
-    }
+    params = {"query": "맛집", "category_group_code": "FD6", "x": str(lon), "y": str(lat), "radius": int(radius_m), "sort": "accuracy"}
     try:
         res = requests.get(url, headers=headers, params=params).json()
-        return res.get('documents', [])[:5]
-    except:
-        return []
+        docs = res.get('documents', [])
+        
+        # [문제 해결 1] 설정 반경 내 데이터가 없을 경우(강/산 등), 탐색 반경 20km 확장 및 거리순 강제 정렬
+        if not docs:
+            params['radius'] = 20000
+            params['sort'] = 'distance'
+            res = requests.get(url, headers=headers, params=params).json()
+            docs = res.get('documents', [])
+        return docs[:5]
+    except: return []
 
 # ==========================================
 # 3. 사이드바 메인 내비게이션
@@ -112,7 +107,6 @@ with st.sidebar:
 # ==========================================
 if 선택메뉴 == "1. 퇴근시간 최적화 AI":
     st.title("🚗 카카오 실시간 연동형 퇴근시간 최적화 AI")
-    
     with st.sidebar:
         st.subheader("분석 범위 설정")
         출발지 = st.text_input("출발지 주소", "충청남도 아산시 탕정면 삼성로 1")
@@ -124,11 +118,9 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
             with st.spinner("카카오 트래픽 데이터 동기화 및 시뮬레이션 중..."):
                 o_lat, o_lon = get_lat_lon(출발지)
                 d_lat, d_lon = get_lat_lon(목적지)
-                
                 if o_lat and d_lat:
                     dist_b, dur_b, path_k = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
                     w_desc, temp_val = get_realtime_weather_and_temp()
-                    
                     if dur_b:
                         now = datetime.now()
                         c_hour = now.hour + now.minute / 60.0
@@ -148,14 +140,11 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
                             h_val = current.hour + current.minute / 60.0
                             peak = math.exp(-((h_val - 18.25) ** 2) / 0.04) if h_val <= 18.25 else math.exp(-((h_val - 18.25) ** 2) / 0.12)
                             noise = random.uniform(-1.0, 1.5)
-                            
-                            dur_A = base_A * (1.0 + peak * 1.2) + noise
-                            dur_B = base_B * (1.0 + peak * 0.3) + (noise * 0.5)
-                            
+                            dur_A, dur_B = base_A * (1.0 + peak * 1.2) + noise, base_B * (1.0 + peak * 0.3) + (noise * 0.5)
                             diff_m = abs((current.hour * 60 + current.minute) - (18 * 60 + 10))
                             penalty = (diff_m ** 1.2) * 0.05
                             
-                            options.append({"departure_time": current.strftime("%H:%M"), "dt_obj": current, "route_name": "경로A (카카오/번영로)", "distance_km": round(dist_b, 1), "duration_min": round(dur_A, 1), "score": dur_A + penalty})
+                            options.append({"departure_time": current.strftime("%H:%M"), "dt_obj": current, "route_name": "경로A (카카오 최적)", "distance_km": round(dist_b, 1), "duration_min": round(dur_A, 1), "score": dur_A + penalty})
                             options.append({"departure_time": current.strftime("%H:%M"), "dt_obj": current, "route_name": "경로B (우회도로)", "distance_km": round(dist_b * 1.15, 1), "duration_min": round(dur_B, 1), "score": dur_B + penalty})
                             current += timedelta(minutes=1)
                         
@@ -168,9 +157,7 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
                         display_df["날씨"] = w_desc
                         display_df["온도"] = f"{temp_val} °C"
                         
-                        st.session_state.commute_data = {
-                            "df": display_df, "o_lat": o_lat, "o_lon": o_lon, "d_lat": d_lat, "d_lon": d_lon, "path_k": path_k
-                        }
+                        st.session_state.commute_data = {"df": display_df, "o_lat": o_lat, "o_lon": o_lon, "d_lat": d_lat, "d_lon": d_lon, "path_k": path_k}
                     else: st.error("카카오 교통망 동기화 실패.")
                 else: st.error("주소 해석 불가.")
 
@@ -188,11 +175,9 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
             folium.Marker([c_res["o_lat"], c_res["o_lon"]], popup="출발지", icon=folium.Icon(color='blue')).add_to(m)
             folium.Marker([c_res["d_lat"], c_res["d_lon"]], popup="목적지", icon=folium.Icon(color='red')).add_to(m)
             
-            if "경로A" in target_route:
-                folium.PolyLine(locations=c_res["path_k"], color='#dc3545', weight=6).add_to(m)
+            if "경로A" in target_route: folium.PolyLine(locations=c_res["path_k"], color='#dc3545', weight=6).add_to(m)
             else:
-                w_B = [36.8200, 127.1100]
-                path_o = get_real_road_path([[c_res["o_lat"], c_res["o_lon"]], w_B, [c_res["d_lat"], c_res["d_lon"]]])
+                path_o = get_real_road_path([[c_res["o_lat"], c_res["o_lon"]], [36.8200, 127.1100], [c_res["d_lat"], c_res["d_lon"]]])
                 folium.PolyLine(locations=path_o, color='#28a745', weight=6).add_to(m)
             st_folium(m, width=700, height=450, key="map_commute_fixed")
 
@@ -201,7 +186,6 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
 # ==========================================
 elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
     st.title("🍻 소요시간 밸런스 기반 회식장소 추천기")
-    
     with st.sidebar:
         st.subheader("매개변수 제어")
         b1, b2 = st.columns(2)
@@ -227,7 +211,6 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                     for p in addresses:
                         lat, lon = get_lat_lon(p["address"])
                         if lat and lon: valid_locations.append({"name": p["name"], "lat": lat, "lon": lon})
-                        time.sleep(0.2)
                     
                     if valid_locations:
                         avg_lat = sum(l["lat"] for l in valid_locations) / len(valid_locations)
@@ -295,7 +278,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                 folium.Marker([float(r['y']), float(r['x'])], popup=r['place_name'], icon=folium.Icon(color='orange', icon='cutlery')).add_to(m)
             st_folium(m, width=700, height=450, key="map_dinner_fixed")
             
-            st.markdown(f"### 🍽️ AI 추천 반경 {d_res['radius']}m 내 인기 맛집 Top 5")
+            st.markdown(f"### 🍽️ AI 추천 반경 내 최적 식당 Top 5")
             if d_res["rests"]:
                 rest_list = []
                 for idx, r in enumerate(d_res["rests"]):
@@ -307,14 +290,14 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                         "상세 주소": addr, "링크 정보": r['place_url']
                     })
                 st.dataframe(pd.DataFrame(rest_list), column_config={"링크 정보": st.column_config.LinkColumn("🔗 카카오맵으로 열기")}, hide_index=True, use_container_width=True)
-            else: st.info("해당 범위 내 검색 결과가 비어있습니다. 탐색 반경을 확장하십시오.")
+            else: st.info("탐색 불가 지역(강/산 등)으로 판별되었습니다. 출발지를 재조정하십시오.")
 
 # ==========================================
 # 6. 모듈 3: 출발 알리미
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.title("💬 출발 알리미 (카카오톡 실시간 공유)")
-    st.markdown("도착 예정 시간(ETA)을 정밀 산출한 뒤, 등록된 연락처 기반으로 가족 및 지인에게 카카오톡 메시지를 전송합니다.")
+    st.markdown("도착 예정 시간(ETA)을 산출하고, 등록된 연락처로 알림을 전송합니다.")
     
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -325,7 +308,7 @@ elif 선택메뉴 == "3. 출발 알리미":
         contact_in = st.text_input("수신자 이름/연락처 고정", value=st.session_state.favorite_contact, placeholder="예: 배우자")
         if st.button("⭐️ 즐겨찾기 주소록 등록 및 변경"):
             st.session_state.favorite_contact = contact_in
-            st.success(f"[{contact_in}]이(가) 시스템 즐겨찾기로 영구 등록되었습니다.")
+            st.success(f"[{contact_in}] 데이터가 시스템에 영구 등록되었습니다.")
             
         if st.button("⏱️ 실시간 ETA 및 카카오톡 전송패널 생성", type="primary"):
             o_lat, o_lon = get_lat_lon(출발지)
@@ -343,7 +326,10 @@ elif 선택메뉴 == "3. 출발 알리미":
         if st.session_state.notify_data:
             n_res = st.session_state.notify_data
             
-            # 카카오 서버 검증 우회를 위한 고정 도메인 하드코딩
+            # [문제 해결 2] 스트림릿 가상 iframe 도메인 자동 검출 및 Fail-safe 텍스트 블록
+            st.code(f"[출발 알림]\n지금 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(약 {n_res['dur']}분 소요 예상)", language="text")
+            st.info("API 에러(4019) 지속 시, 위 텍스트 창 우측 상단의 복사 버튼을 사용하여 전송할 수 있습니다.")
+            
             kakao_js_code = f"""
             <script src="https://t1.kakaocdn.net/kakao_js_sdk/2.7.0/kakao.min.js"></script>
             <script>
@@ -351,19 +337,29 @@ elif 선택메뉴 == "3. 출발 알리미":
               function pushKakaoShare() {{
                 Kakao.Share.sendDefault({{
                   objectType: 'text',
-                  text: '[출발 알림]\\n지금 퇴근하고 출발합니다.\\n🚗 도착 예정 시간: {n_res["eta"]}\\n(실시간 교통망 기준 약 {n_res["dur"]}분 소요)',
+                  text: '[출발 알림]\\n지금 출발합니다.\\n🚗 도착 예정 시간: {n_res["eta"]}\\n(약 {n_res["dur"]}분 소요)',
                   link: {{
-                    mobileWebUrl: 'https://commute-ai-my-project.streamlit.app',
-                    webUrl: 'https://commute-ai-my-project.streamlit.app'
+                    mobileWebUrl: 'https://developers.kakao.com',
+                    webUrl: 'https://developers.kakao.com'
                   }},
                 }});
               }}
+              
+              window.onload = function() {{
+                  document.getElementById("domain_info").innerText = window.location.origin;
+              }}
             </script>
-            <div style="text-align: center; margin-top: 20px;">
+            <div style="text-align: center; margin-top: 10px; border: 1px solid #ddd; padding: 10px; border-radius: 8px;">
+                <p style="font-family:sans-serif; color:red; font-size:12px; margin-bottom:5px;">
+                    ※ 에러 4019 발생 원인: 스트림릿 보안에 의해 생성된 아래의 동적 도메인이 카카오에 등록되지 않았습니다.<br>
+                    정상 작동을 원하시면 카카오 디벨로퍼스 [Web] 메뉴에 아래의 도메인을 반드시 추가하십시오.
+                </p>
+                <p style="font-weight:bold; background:#f4f4f4; padding:8px; border-radius:4px; font-size:14px; margin-bottom:15px;" id="domain_info">도메인 추적 중...</p>
+                
                 <p style="font-family:sans-serif; color:#333; font-size:14px;">지정 대상: <b>{n_res["target"]}</b></p>
-                <button onclick="pushKakaoShare()" style="background:#FEE500; border:none; padding:15px 40px; border-radius:8px; cursor:pointer; font-weight:bold; font-size:16px; color:#3c1e1e; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                <button onclick="pushKakaoShare()" style="background:#FEE500; border:none; padding:15px 40px; border-radius:8px; cursor:pointer; font-weight:bold; font-size:16px; color:#3c1e1e;">
                     💬 실제 카카오톡으로 전송하기
                 </button>
             </div>
             """
-            components.html(kakao_js_code, height=200)
+            components.html(kakao_js_code, height=260)
