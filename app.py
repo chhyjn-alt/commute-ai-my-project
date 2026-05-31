@@ -12,7 +12,7 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 
 # ==========================================
-# 1. 페이지 및 세션 상태 초기화 (백지화 방지)
+# 1. 페이지 및 세션 상태 초기화
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="wide")
 
@@ -23,7 +23,6 @@ if 'dinner_data' not in st.session_state: st.session_state.dinner_data = None
 if 'notify_data' not in st.session_state: st.session_state.notify_data = None
 
 # 고정 API 키 설정
-# 수집된 계정 자격 증명을 코드 내에 바인딩 처리
 str_kakao_rest_key = "df68bf65618592b6d685caec6521432f"
 str_kakao_js_key = "165629b32a8ebc5fee6b3ed48e6d708b"
 
@@ -32,8 +31,7 @@ str_kakao_js_key = "165629b32a8ebc5fee6b3ed48e6d708b"
 # ==========================================
 @st.cache_data
 def get_lat_lon(address):
-    """지오코딩을 통해 주소를 위도, 경도로 변환합니다."""
-    geolocator = Nominatim(user_agent="happy_work_final_system")
+    geolocator = Nominatim(user_agent="happy_work_final_system_v3")
     try:
         location = geolocator.geocode(address)
         return (location.latitude, location.longitude) if location else (None, None)
@@ -42,7 +40,6 @@ def get_lat_lon(address):
 
 @st.cache_data
 def get_realtime_weather_and_temp():
-    """기상청 격자 데이터를 우회하여 실시간 날씨 및 온도를 파싱합니다."""
     try:
         res = requests.get("https://api.open-meteo.com/v1/forecast?latitude=36.8065&longitude=127.1522&current_weather=true&timezone=auto", timeout=5).json()
         code = res['current_weather']['weathercode']
@@ -57,7 +54,6 @@ def get_realtime_weather_and_temp():
 
 @st.cache_data
 def get_kakao_navi_baseline(origin_lat, origin_lon, dest_lat, dest_lon):
-    """카카오 모빌리티 실시간 주행 데이터를 동기화합니다."""
     url = "https://apis-navi.kakaomobility.com/v1/directions"
     headers = {"Authorization": f"KakaoAK {str_kakao_rest_key}"}
     params = {"origin": f"{origin_lon},{origin_lat}", "destination": f"{dest_lon},{dest_lat}", "priority": "RECOMMEND"}
@@ -87,12 +83,11 @@ def get_real_road_path(waypoints):
         return waypoints 
 
 def get_kakao_restaurants(lat, lon, radius_m):
-    """검색 누락 방지를 위해 keyword 엔드포인트를 사용해 반경 내 식당을 정확도순(인지도 반영)으로 추출합니다."""
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {str_kakao_rest_key}"}
     params = {
         "query": "맛집",
-        "category_group_code": "FD6", # 음식점 카테고리 제한
+        "category_group_code": "FD6",
         "x": str(lon), 
         "y": str(lat), 
         "radius": int(radius_m), 
@@ -173,14 +168,12 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
                         display_df["날씨"] = w_desc
                         display_df["온도"] = f"{temp_val} °C"
                         
-                        # 세션에 최종 상태 저장하여 화면 고정
                         st.session_state.commute_data = {
                             "df": display_df, "o_lat": o_lat, "o_lon": o_lon, "d_lat": d_lat, "d_lon": d_lon, "path_k": path_k
                         }
                     else: st.error("카카오 교통망 동기화 실패.")
                 else: st.error("주소 해석 불가.")
 
-    # 세션 데이터 존재 시 결과 UI 상시 유지
     if st.session_state.commute_data:
         c_res = st.session_state.commute_data
         col1, col2 = st.columns([1, 1])
@@ -285,9 +278,8 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             if d_res["best_times"]:
                 t_cols = st.columns(len(d_res["valid_locations"]))
                 for idx, col in enumerate(t_cols):
-                    col.metric(d_res["valid_locations[idx]"]["name"], f"약 {int(d_res['best_times'][idx]//60)}분")
+                    col.metric(d_res["valid_locations"][idx]["name"], f"약 {int(d_res['best_times'][idx]//60)}분")
             
-            # 지도 및 원형 반경 렌더링 (투명도 70% 고정)
             m = folium.Map(location=[d_res["b_lat"], d_res["b_lon"]], zoom_start=14, tiles='OpenStreetMap')
             for l in d_res["valid_locations"]:
                 folium.Marker([l["lat"], l["lon"]], popup=l["name"]).add_to(m)
@@ -303,7 +295,6 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                 folium.Marker([float(r['y']), float(r['x'])], popup=r['place_name'], icon=folium.Icon(color='orange', icon='cutlery')).add_to(m)
             st_folium(m, width=700, height=450, key="map_dinner_fixed")
             
-            # 검색 순위 탑 5 데이터프레임 구조적 매핑 표 노출
             st.markdown(f"### 🍽️ AI 추천 반경 {d_res['radius']}m 내 인기 맛집 Top 5")
             if d_res["rests"]:
                 rest_list = []
@@ -352,7 +343,7 @@ elif 선택메뉴 == "3. 출발 알리미":
         if st.session_state.notify_data:
             n_res = st.session_state.notify_data
             
-            # 카카오 JS SDK 공유 모듈 스크립트 임베딩
+            # 카카오 서버 검증 우회를 위한 고정 도메인 하드코딩
             kakao_js_code = f"""
             <script src="https://t1.kakaocdn.net/kakao_js_sdk/2.7.0/kakao.min.js"></script>
             <script>
@@ -361,7 +352,10 @@ elif 선택메뉴 == "3. 출발 알리미":
                 Kakao.Share.sendDefault({{
                   objectType: 'text',
                   text: '[출발 알림]\\n지금 퇴근하고 출발합니다.\\n🚗 도착 예정 시간: {n_res["eta"]}\\n(실시간 교통망 기준 약 {n_res["dur"]}분 소요)',
-                  link: {{ mobileWebUrl: window.location.href, webUrl: window.location.href }},
+                  link: {{
+                    mobileWebUrl: 'https://commute-ai-my-project.streamlit.app',
+                    webUrl: 'https://commute-ai-my-project.streamlit.app'
+                  }},
                 }});
               }}
             </script>
