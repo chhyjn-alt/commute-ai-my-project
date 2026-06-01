@@ -8,12 +8,21 @@ import time
 import polyline
 from datetime import datetime, timedelta
 from streamlit_folium import st_folium
-import streamlit.components.v1 as components  # 네이티브 전송을 위한 컴포넌트 추가
+import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 페이지 설정 및 세션 상태 구조적 초기화
+# 1. 페이지 설정 및 당겨서 새로고침 원천 차단
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
+
+# 모바일 '당겨서 새로고침(Pull-to-refresh)' 제스처 비활성화 CSS
+st.markdown("""
+    <style>
+    html, body, [data-testid="stAppViewContainer"], .stApp {
+        overscroll-behavior-y: none !important;
+    }
+    </style>
+""", unsafe_allow_code=True)
 
 # 리셋 방지용 필수 세션 키 생성
 initial_session_keys = {
@@ -38,7 +47,6 @@ str_kakao_rest_key = "df68bf65618592b6d685caec6521432f"
 # 2. 핵심 네트워크 API 정의
 # ==========================================
 def search_kakao_address(query):
-    """카카오 API를 이용하여 정확한 도로명 주소 목록을 검색합니다."""
     if not query or not query.strip():
         return []
     url = "https://dapi.kakao.com/v2/local/search/address.json"
@@ -110,7 +118,7 @@ def get_kakao_restaurants(lat, lon, radius_m):
         return []
 
 # ==========================================
-# 3. 사이드바 내비게이션 (상태 유지 키 할당)
+# 3. 사이드바 내비게이션
 # ==========================================
 with st.sidebar:
     st.markdown("### ⚙️ 시스템 메뉴")
@@ -124,8 +132,6 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
     
     with st.sidebar:
         st.markdown("#### 주소 검색 및 선택")
-        
-        # 출발지 검색 패널
         m1_start_q = st.text_input("출발지 검색어 입력", "탕정 삼성로", key="m1_start_q")
         if st.button("출발지 주소 검색", key="m1_start_btn", use_container_width=True):
             st.session_state.m1_start_results = search_kakao_address(m1_start_q)
@@ -138,7 +144,6 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
             selected_m1_start = None
 
         st.markdown("---")
-        # 목적지 검색 패널
         m1_end_q = st.text_input("목적지 검색어 입력", "천안 성황로", key="m1_end_q")
         if st.button("목적지 주소 검색", key="m1_end_btn", use_container_width=True):
             st.session_state.m1_end_results = search_kakao_address(m1_end_q)
@@ -207,7 +212,7 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
                             st.session_state.commute_data = {"df": display_df, "o_lat": o_lat, "o_lon": o_lon, "d_lat": d_lat, "d_lon": d_lon, "path_k": path_k}
                         else:
                             st.error("카카오 맵 경로 서버 통신에 실패했습니다.")
-                    except Exception as e:
+                    except Exception:
                         st.error("데이터 파싱 도중 예외가 발생했습니다.")
 
     if st.session_state.commute_data:
@@ -249,7 +254,6 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
     st.markdown("#### 👥 참석자 주소 검색")
     addresses = []
     
-    # 동적 주소 검색 UI 빌드
     for i in range(st.session_state.num_people):
         st.markdown(f"**참석자 {i+1} 설정**")
         p_query = st.text_input(f"참석자 {i+1} 도로명/건물명 검색", key=f"m2_p_query_{i}")
@@ -365,14 +369,13 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미 (네이티브 전송 기능 추가)
+# 6. 모듈 3: 출발 알리미
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
     
     st.markdown("#### 경로 및 수신 설정")
     
-    # 3번 모듈 출발지 검색 패널
     m3_start_q = st.text_input("출발지 검색어 입력", "탕정 삼성로", key="m3_start_q")
     if st.button("출발지 검색", key="m3_start_btn", use_container_width=True):
         st.session_state.m3_start_results = search_kakao_address(m3_start_q)
@@ -384,7 +387,6 @@ elif 선택메뉴 == "3. 출발 알리미":
         selected_m3_start = None
 
     st.markdown("---")
-    # 3번 모듈 목적지 검색 패널
     m3_end_q = st.text_input("목적지 검색어 입력", "천안 성황로", key="m3_end_q")
     if st.button("목적지 검색", key="m3_end_btn", use_container_width=True):
         st.session_state.m3_end_results = search_kakao_address(m3_end_q)
@@ -422,54 +424,43 @@ elif 선택메뉴 == "3. 출발 알리미":
 
     st.markdown("---")
     if st.session_state.notify_data:
-        st.markdown("#### 📋 카카오톡 전송 템플릿")
         n_res = st.session_state.notify_data
         
-        # 실제 전송될 텍스트 멘트 구성
         final_msg = f"[{n_res['target']}님 출발 알림]\\n지금 퇴근 후 출발합니다.\\n🚗 도착 예정 시간: {n_res['eta']}\\n(실시간 교통망 기준 약 {n_res['dur']}분 소요 예상)"
         
-        # 1. 시각적 확인을 위한 코드 블록
-        st.code(final_msg.replace("\\n", "\n"), language="text")
-        st.success("우측 상단 복사 단추를 누르고 카카오톡 창에 붙여넣으십시오.")
+        st.markdown("#### 💬 카카오톡 즉시 전송")
         
-        st.markdown("---")
-        st.markdown("#### 💬 메신저로 전송 (모바일 전용)")
-        
-        # 2. [전송] 버튼 구현 (JavaScript Native Share API 활용)
-        # 이 방식은 OS의 공유 기능을 호출하므로 보안/정책 문제가 없습니다.
         share_js = f"""
         <script>
-        function sendToMessenger() {{
+        function copyAndOpenKakao() {{
             const msg = `{final_msg}`;
-            if (navigator.share) {{
-                navigator.share({{
-                    title: '출발 알림',
-                    text: msg.replace(/\\\\n/g, '\\n') // 자바스크립트 줄바꿈으로 복원
-                }}).then(() => {{
-                    console.log('공유 성공');
-                }}).catch((error) => {{
-                    console.log('공유 실패', error);
-                }});
-            }} else {{
-                alert("이 브라우저는 Native 공유 기능을 지원하지 않습니다. 모바일 환경에서 사용해 주십시오.");
-            }}
+            
+            const textarea = document.createElement('textarea');
+            textarea.value = msg.replace(/\\\\n/g, '\\n');
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+            
+            alert("✅ 안내 멘트가 복사되었습니다!\\n\\n카카오톡이 켜지면 원하는 대화방에 [붙여넣기] 하세요.");
+            window.location.href = 'intent://#Intent;package=com.kakao.talk;end';
         }}
         </script>
-        <button onclick="sendToMessenger()" style="
+        <button onclick="copyAndOpenKakao()" style="
             width: 100%;
-            background-color: #FEE500; /* 카카오 노란색 */
-            color: #3C1E1E; /* 카카오 갈색 */
+            background-color: #FEE500;
+            color: #3C1E1E;
             border: none;
-            padding: 12px 20px;
+            padding: 15px 20px;
             border-radius: 8px;
             font-size: 16px;
             font-weight: bold;
             cursor: pointer;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-top: 10px;
         ">
-            💬 카카오톡/메신저 전송
+            💬 카카오톡 열고 붙여넣기
         </button>
         """
         
-        # HTML/JS 컴포넌트 삽입
-        components.html(share_js, height=70)
+        components.html(share_js, height=100)
