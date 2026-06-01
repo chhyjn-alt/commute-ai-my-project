@@ -11,18 +11,9 @@ from streamlit_folium import st_folium
 import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 페이지 설정 및 당겨서 새로고침 원천 차단
+# 1. 페이지 설정 및 세션 상태 구조적 초기화
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
-
-# 모바일 '당겨서 새로고침(Pull-to-refresh)' 제스처 비활성화 CSS
-st.markdown("""
-    <style>
-    html, body, [data-testid="stAppViewContainer"], .stApp {
-        overscroll-behavior-y: none !important;
-    }
-    </style>
-""", unsafe_allow_code=True)
 
 # 리셋 방지용 필수 세션 키 생성
 initial_session_keys = {
