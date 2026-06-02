@@ -11,18 +11,11 @@ from streamlit_folium import st_folium
 import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 페이지 설정 및 당겨서 새로고침 원천 차단
+# 1. 페이지 설정 및 세션 상태 초기화 (CSS 충돌 원인 완전 제거)
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
 
-st.markdown("""
-    <style>
-    html, body, [data-testid="stAppViewContainer"], .stApp {
-        overscroll-behavior-y: none !important;
-    }
-    </style>
-""", unsafe_allow_code=True)
-
+# 리셋 방지용 필수 세션 키 생성
 initial_session_keys = {
     'num_people': 3,
     'favorite_contact': "",
@@ -428,7 +421,6 @@ elif 선택메뉴 == "3. 출발 알리미":
         
         st.markdown("#### 💬 카카오톡 즉시 전송")
         
-        # 구글 플레이스토어 대신 설치된 카카오톡 앱을 직접 호출하는 URL 스킴(kakaotalk://)으로 수정 적용
         share_js = f"""
         <script>
         function copyAndOpenKakao() {{
@@ -442,8 +434,6 @@ elif 선택메뉴 == "3. 출발 알리미":
             document.body.removeChild(textarea);
             
             alert("✅ 안내 멘트가 복사되었습니다!\\n\\n카카오톡이 켜지면 원하는 대화방에 [붙여넣기] 하세요.");
-            
-            // 카카오톡 직접 실행을 위한 커스텀 URL 스킴
             window.location.href = 'kakaotalk://';
         }}
         </script>
