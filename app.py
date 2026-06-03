@@ -6,7 +6,7 @@ import streamlit as st
 import folium
 import time
 import polyline
-import urllib.parse # 문자 메시지 특수문자 변환용 라이브러리 추가
+import urllib.parse
 from datetime import datetime, timedelta
 from streamlit_folium import st_folium
 import streamlit.components.v1 as components
@@ -360,7 +360,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미 (원클릭 자동 산출 + 문자 앱 자동 전송 통합)
+# 6. 모듈 3: 출발 알리미 (강제 문자 앱 실행 + 주소 정보 포함)
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
@@ -389,7 +389,6 @@ elif 선택메뉴 == "3. 출발 알리미":
         selected_m3_end = None
 
     st.markdown("---")
-    # 수신자 이름과 번호를 혼합 입력해도 시스템이 자동 분리
     contact_in = st.text_input("수신자 연락처 고정 (이름+번호)", value=st.session_state.favorite_contact, placeholder="예: 배우자 01012345678", key="m3_contact_input")
     if st.button("⭐️ 즐겨찾기 등록", use_container_width=True, key="m3_fav_btn"):
         st.session_state.favorite_contact = contact_in
@@ -411,39 +410,52 @@ elif 선택메뉴 == "3. 출발 알리미":
                     
                     _, dur, _ = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
                     if dur:
-                        # 1. ETA 계산 및 문자 내용 조합
+                        # 1. ETA 계산
                         eta_time = datetime.now() + timedelta(minutes=dur)
                         eta_str = eta_time.strftime('%H시 %M분')
                         
-                        # 텍스트에 들어갈 이름 추출 (공백 기준 첫 단어)
+                        # 텍스트에 들어갈 이름 추출
                         target_name = contact_in.split(" ")[0] if " " in contact_in else contact_in
                         
-                        final_msg = f"[{target_name}님 출발 알림]\n지금 퇴근 후 출발합니다.\n🚗 도착 예정 시간: {eta_str}\n(실시간 교통망 기준 약 {int(dur)}분 소요 예상)"
+                        # 출발지/목적지 정보가 추가된 최종 메시지 구성
+                        final_msg = f"[{target_name}님 출발 알림]\n지금 퇴근 후 출발합니다.\n\n📍 출발: {selected_m3_start}\n🚩 도착: {selected_m3_end}\n\n🚗 도착 예정 시간: {eta_str}\n(실시간 교통망 기준 약 {int(dur)}분 소요 예상)"
                         
-                        # 2. 전화번호만 자동으로 추출 필터링
+                        # 2. 전화번호만 필터링
                         phone_number = "".join(filter(str.isdigit, contact_in))
                         
-                        # 3. SMS 규격에 맞게 특수문자 안전 인코딩
+                        # 3. SMS 프로토콜 및 특수문자 안전 인코딩
                         encoded_msg = urllib.parse.quote(final_msg)
-                        sms_uri = f"sms:{phone_number}?body={encoded_msg}"
+                        
+                        # 안드로이드 인텐트 호출 구문 (가장 강력한 강제 실행)
+                        intent_uri = f"intent://send?address={phone_number}&sms_body={encoded_msg}#Intent;action=android.intent.action.SENDTO;scheme=sms;end"
                         
                         st.success("✅ 연산 완료! 문자 앱을 자동으로 호출합니다.")
                         st.code(final_msg, language="text")
                         
-                        # 4. 문자 앱 자동 실행 스크립트 + 수동 백업 버튼 (Iframe 탈출 동시 적용)
-                        auto_sms_js = f"""
+                        # 4. OS 강제 명령을 위한 투명 링크 자동 클릭 스크립트 적용 (보안 무력화)
+                        force_sms_js = f"""
                         <script>
-                        // 페이지가 로딩되자마자 최상위 시스템을 통해 즉시 문자앱 실행
                         window.onload = function() {{
-                            try {{
-                                window.top.location.href = "{sms_uri}";
-                            }} catch(e) {{
-                                console.log("자동 실행 차단됨, 수동 버튼 사용 대기");
-                            }}
+                            var link = document.createElement('a');
+                            link.href = "{intent_uri}";
+                            link.target = "_top"; // Iframe 밖으로 탈출
+                            document.body.appendChild(link);
+                            
+                            // 시스템 단의 자동 터치 유발
+                            link.click();
+                            
+                            // 만약 안드로이드 intent가 실패하면 표준 sms uri로 폴백
+                            setTimeout(function() {{
+                                var fallback = document.createElement('a');
+                                fallback.href = "sms:{phone_number}?body={encoded_msg}";
+                                fallback.target = "_top";
+                                document.body.appendChild(fallback);
+                                fallback.click();
+                            }}, 1000);
                         }};
                         </script>
                         
-                        <a href="{sms_uri}" target="_top" style="
+                        <a href="sms:{phone_number}?body={encoded_msg}" target="_top" style="
                             display: block;
                             width: 100%;
                             box-sizing: border-box;
@@ -459,10 +471,10 @@ elif 선택메뉴 == "3. 출발 알리미":
                             font-family: sans-serif;
                             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
                         ">
-                            💬 문자 앱이 자동으로 안 열리면 누르세요
+                            💬 문자 앱 열고 전송하기 (수동)
                         </a>
                         """
-                        components.html(auto_sms_js, height=80)
+                        components.html(force_sms_js, height=80)
                         
                     else: 
                         st.error("교통정보를 획득하지 못했습니다.")
