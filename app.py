@@ -358,7 +358,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미 (스트림릿 고유 link_button 적용)
+# 6. 모듈 3: 출발 알리미 (표준 마크다운 링크 적용)
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
@@ -369,4 +369,71 @@ elif 선택메뉴 == "3. 출발 알리미":
     if st.button("출발지 검색", key="m3_start_btn", use_container_width=True):
         st.session_state.m3_start_results = search_kakao_address(m3_start_q)
         
-    m3_start_options = [doc['address_name']
+    m3_start_options = [doc['address_name'] for doc in st.session_state.m3_start_results]
+    if m3_start_options:
+        selected_m3_start = st.selectbox("출발 주소 선택", m3_start_options, key="m3_start_select")
+    else:
+        selected_m3_start = None
+
+    st.markdown("---")
+    m3_end_q = st.text_input("목적지 검색어 입력", "천안 성황로", key="m3_end_q")
+    if st.button("목적지 검색", key="m3_end_btn", use_container_width=True):
+        st.session_state.m3_end_results = search_kakao_address(m3_end_q)
+        
+    m3_end_options = [doc['address_name'] for doc in st.session_state.m3_end_results]
+    if m3_end_options:
+        selected_m3_end = st.selectbox("목적 주소 선택", m3_end_options, key="m3_end_select")
+    else:
+        selected_m3_end = None
+
+    st.markdown("---")
+    contact_in = st.text_input("수신자 연락처 (이름+번호)", value=st.session_state.favorite_contact, placeholder="예: 배우자 01012345678", key="m3_contact_input")
+    if st.button("⭐️ 즐겨찾기 등록", use_container_width=True, key="m3_fav_btn"):
+        st.session_state.favorite_contact = contact_in
+        st.success("즐겨찾기로 등록되었습니다.")
+        
+    if st.button("✅ 출발지/도착지 데이터 계산", type="primary", use_container_width=True, key="m3_prepare_btn"):
+         if not selected_m3_start or not selected_m3_end:
+            st.error("출발지와 목적지 주소를 검색 후 선택 완료해 주십시오.")
+         elif not contact_in:
+            st.error("수신자 연락처를 입력해 주십시오.")
+         else:
+             with st.spinner("교통 정보 분석 중..."):
+                 try:
+                    s_idx = m3_start_options.index(selected_m3_start)
+                    e_idx = m3_end_options.index(selected_m3_end)
+                    o_lat, o_lon = float(st.session_state.m3_start_results[s_idx]['y']), float(st.session_state.m3_start_results[s_idx]['x'])
+                    d_lat, d_lon = float(st.session_state.m3_end_results[e_idx]['y']), float(st.session_state.m3_end_results[e_idx]['x'])
+                    
+                    _, dur, _ = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
+                    if dur:
+                        eta_time = datetime.now() + timedelta(minutes=dur)
+                        eta_str = eta_time.strftime('%H시 %M분')
+                        target_name = contact_in.split(" ")[0] if " " in contact_in else contact_in
+                        
+                        final_msg = f"[{target_name}님 출발 알림]\n지금 퇴근 후 출발합니다.\n\n📍 출발: {selected_m3_start}\n🚩 도착: {selected_m3_end}\n\n🚗 도착 예정 시간: {eta_str}\n(실시간 교통망 기준 약 {int(dur)}분 소요 예상)"
+                        phone_number = "".join(filter(str.isdigit, contact_in))
+                        
+                        st.session_state.notify_data = {
+                            "ready": True, 
+                            "msg": final_msg, 
+                            "phone": phone_number
+                        }
+                    else:
+                        st.error("교통정보를 획득하지 못했습니다.")
+                 except Exception as e:
+                     st.error("연산 처리 중 오류가 발생했습니다.")
+
+    st.markdown("---")
+    
+    if st.session_state.notify_data and st.session_state.notify_data.get("ready"):
+        n_res = st.session_state.notify_data
+        
+        st.markdown("#### 📋 발송 내용 확인")
+        st.code(n_res['msg'], language="text")
+        
+        encoded_msg = urllib.parse.quote(n_res['msg'])
+        phone_num = n_res['phone']
+        
+        sms_url = f"sms:{phone_num}?body={encoded_msg}"
+        st.markdown(f"### [💬 여기를 터치하여 문자 앱으로 전송하기]({sms_url})")
