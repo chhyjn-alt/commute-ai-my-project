@@ -4,15 +4,13 @@ import requests
 import pandas as pd
 import streamlit as st
 import folium
-import time
 import polyline
 import urllib.parse
 from datetime import datetime, timedelta
 from streamlit_folium import st_folium
-import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 페이지 설정 및 세션 상태 구조적 초기화
+# 1. 페이지 설정 및 상태 초기화
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
 
@@ -360,7 +358,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미 (강제 문자 앱 실행 + 주소 정보 포함)
+# 6. 모듈 3: 출발 알리미 (HTML a태그 기반 안정화)
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
@@ -389,15 +387,12 @@ elif 선택메뉴 == "3. 출발 알리미":
         selected_m3_end = None
 
     st.markdown("---")
-    contact_in = st.text_input("수신자 연락처 고정 (이름+번호)", value=st.session_state.favorite_contact, placeholder="예: 배우자 01012345678", key="m3_contact_input")
+    contact_in = st.text_input("수신자 연락처 (이름+번호)", value=st.session_state.favorite_contact, placeholder="예: 배우자 01012345678", key="m3_contact_input")
     if st.button("⭐️ 즐겨찾기 등록", use_container_width=True, key="m3_fav_btn"):
         st.session_state.favorite_contact = contact_in
         st.success("즐겨찾기로 등록되었습니다.")
         
-    # ===== 핵심 변경사항: 파이썬의 st.button 대신 HTML/JS 네이티브 버튼 사용 =====
-    # 사용자가 입력한 데이터를 파이썬 세션에 먼저 저장하기 위한 숨겨진 연산 처리
-    
-    if st.button("✅ 출발지/도착지 데이터 계산 준비", use_container_width=True, key="m3_prepare_btn"):
+    if st.button("✅ 출발지/도착지 데이터 계산", type="primary", use_container_width=True, key="m3_prepare_btn"):
          if not selected_m3_start or not selected_m3_end:
             st.error("출발지와 목적지 주소를 검색 후 선택 완료해 주십시오.")
          elif not contact_in:
@@ -424,7 +419,6 @@ elif 선택메뉴 == "3. 출발 알리미":
                             "msg": final_msg, 
                             "phone": phone_number
                         }
-                        st.success("데이터 계산 완료. 아래 버튼을 눌러 문자를 발송하십시오.")
                     else:
                         st.error("교통정보를 획득하지 못했습니다.")
                  except Exception as e:
@@ -432,7 +426,6 @@ elif 선택메뉴 == "3. 출발 알리미":
 
     st.markdown("---")
     
-    # 데이터가 준비되었을 때만 네이티브 링크 버튼 출력
     if st.session_state.notify_data and st.session_state.notify_data.get("ready"):
         n_res = st.session_state.notify_data
         
@@ -442,26 +435,23 @@ elif 선택메뉴 == "3. 출발 알리미":
         encoded_msg = urllib.parse.quote(n_res['msg'])
         phone_num = n_res['phone']
         
-        # 보안을 뚫는 가장 확실한 방법: 순수 HTML <a> 태그와 target="_top"의 결합.
-        # 이 버튼을 누르면 사용자의 명시적 클릭이므로 무조건 문자 앱이 열립니다.
-        native_btn_html = f"""
-        <a href="sms:{phone_num}?body={encoded_msg}" target="_top" style="
+        # 순수 HTML a 태그. Iframe 외부의 스트림릿 메인 DOM에 직접 삽입되어 보안 정책을 우회.
+        html_link = f"""
+        <a href="sms:{phone_num}?body={encoded_msg}" style="
             display: block;
             width: 100%;
-            box-sizing: border-box;
-            text-align: center;
+            padding: 15px 0;
             background-color: #007aff;
             color: #ffffff;
-            border: none;
-            padding: 15px 0;
+            text-align: center;
             border-radius: 8px;
             font-size: 16px;
             font-weight: bold;
             text-decoration: none;
-            font-family: sans-serif;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-top: 10px;
         ">
-            💬 문자 앱 열고 자동 전송하기
+            💬 시스템 기본 문자 앱으로 전송하기
         </a>
         """
-        components.html(native_btn_html, height=80)
+        st.markdown(html_link, unsafe_allow_code=True)
