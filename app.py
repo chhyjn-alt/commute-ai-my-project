@@ -163,13 +163,15 @@ if 선택메뉴 == "1. 퇴근시간 최적화 AI":
                         w_desc, temp_val = get_realtime_weather_and_temp()
                         
                         if dur_b:
-                            now = datetime.now()
-                            c_hour = now.hour + now.minute / 60.0
+                            # KST (한국 표준시) 동기화 적용
+                            now_kst = datetime.utcnow() + timedelta(hours=9)
+                            c_hour = now_kst.hour + now_kst.minute / 60.0
+                            
                             c_peak = math.exp(-((c_hour - 18.25) ** 2) / 0.04) if c_hour <= 18.25 else math.exp(-((c_hour - 18.25) ** 2) / 0.12)
                             base_A = dur_b / (1.0 + c_peak * 1.2)
                             base_B = base_A * 1.15
                             
-                            today = datetime.today()
+                            today = now_kst
                             start_dt = datetime(today.year, today.month, today.day, 탐색_시작.hour, 탐색_시작.minute)
                             end_dt = datetime(today.year, today.month, today.day, 탐색_종료.hour, 탐색_종료.minute)
                             
@@ -358,7 +360,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미 (표준 마크다운 링크 적용)
+# 6. 모듈 3: 출발 알리미 (KST 동기화 적용)
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
@@ -407,8 +409,11 @@ elif 선택메뉴 == "3. 출발 알리미":
                     
                     _, dur, _ = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
                     if dur:
-                        eta_time = datetime.now() + timedelta(minutes=dur)
+                        # KST (한국 표준시) 동기화 연산
+                        now_kst = datetime.utcnow() + timedelta(hours=9)
+                        eta_time = now_kst + timedelta(minutes=dur)
                         eta_str = eta_time.strftime('%H시 %M분')
+                        
                         target_name = contact_in.split(" ")[0] if " " in contact_in else contact_in
                         
                         final_msg = f"[{target_name}님 출발 알림]\n지금 퇴근 후 출발합니다.\n\n📍 출발: {selected_m3_start}\n🚩 도착: {selected_m3_end}\n\n🚗 도착 예정 시간: {eta_str}\n(실시간 교통망 기준 약 {int(dur)}분 소요 예상)"
