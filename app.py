@@ -11,7 +11,7 @@ from streamlit_folium import st_folium
 import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 페이지 설정 및 세션 상태 초기화 (CSS 충돌 코드 완전 삭제됨)
+# 1. 페이지 설정 및 세션 상태 구조적 초기화
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
 
@@ -353,14 +353,14 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                         "종류": r.get('category_name', '').split('>')[-1].strip(),
                         "주소": addr, "링크": r['place_url']
                     })
-                st.dataframe(pd.DataFrame(rest_list), column_config={"링크": st.column_config.LinkColumn("🔗 지도")}, hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(rest_list), column_config={"リンク": st.column_config.LinkColumn("🔗 지도")}, hide_index=True, use_container_width=True)
             else:
                 st.info(f"지정한 반경({d_res['radius']}m) 내에 검색된 맛집이 없습니다.")
         except:
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미
+# 6. 모듈 3: 출발 알리미 (SMS 기본 문자 앱 연동 체계)
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
@@ -389,7 +389,7 @@ elif 선택메뉴 == "3. 출발 알리미":
         selected_m3_end = None
 
     st.markdown("---")
-    contact_in = st.text_input("수신자 이름", value=st.session_state.favorite_contact, placeholder="예: 배우자", key="m3_contact_input")
+    contact_in = st.text_input("수신자 연락처 고정", value=st.session_state.favorite_contact, placeholder="예: 01012345678", key="m3_contact_input")
     if st.button("⭐️ 즐겨찾기 등록", use_container_width=True, key="m3_fav_btn"):
         st.session_state.favorite_contact = contact_in
         st.success("즐겨찾기로 등록되었습니다.")
@@ -417,4 +417,50 @@ elif 선택메뉴 == "3. 출발 알리미":
     if st.session_state.notify_data:
         n_res = st.session_state.notify_data
         
-        final_msg = f"[{n_res['target']}님 출발 알림]\\n지금 퇴근 후 출발합니다.\\n🚗 도착 예정 시간: {n_res['eta']}\\n(실시간 교통망 기준 약 {n_res['dur']}분 소요 예상)"
+        # 줄바꿈 문자를 포함한 실제 텍스트 메시지 구성
+        msg_text = f"[출발 알림]\n지금 퇴근 후 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(실시간 교통망 기준 약 {n_res['dur']}분 소요 예상)"
+        
+        st.markdown("#### 📋 전송 내용 확인")
+        st.code(msg_text, language="text")
+        
+        # 하드웨어 레벨의 기본 SMS 앱 강제 호출 스크립트 (iframe 격리 탈출 적용)
+        sms_js = f"""
+        <script>
+        function openDefaultSMS() {{
+            const msg = `{msg_text}`;
+            const rawTarget = `{n_res['target']}`;
+            
+            // 번호 외에 이름이 포함되어 있을 경우를 대비해 숫자만 필터링 가공
+            const phoneNumber = rawTarget.replace(/[^0-9]/g, '');
+            
+            // 모바일 표준 SMS 인텐트 URI 구성 (자동 인코딩 처리)
+            const smsUri = 'sms:' + phoneNumber + '?body=' + encodeURIComponent(msg);
+            
+            try {{
+                window.top.location.href = smsUri;
+            }} catch(e) {{
+                const a = document.createElement('a');
+                a.href = smsUri;
+                a.target = '_top';
+                document.body.appendChild(a);
+                a.click();
+            }}
+        }}
+        </script>
+        <button onclick="openDefaultSMS()" style="
+            width: 100%;
+            background-color: #007aff;
+            color: #ffffff;
+            border: none;
+            padding: 15px 20px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-top: 10px;
+        ">
+            💬 기본 문자 앱 열고 자동 전송하기
+        </button>
+        """
+        components.html(sms_js, height=80)
