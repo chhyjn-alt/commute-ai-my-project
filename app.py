@@ -394,15 +394,17 @@ elif 선택메뉴 == "3. 출발 알리미":
         st.session_state.favorite_contact = contact_in
         st.success("즐겨찾기로 등록되었습니다.")
         
-    # ===== 핵심: 산출 및 자동 전송을 하나의 버튼으로 통합 =====
-    if st.button("⏱️ 결과 산출 및 자동 문자 전송", type="primary", use_container_width=True, key="m3_run_btn"):
-        if not selected_m3_start or not selected_m3_end:
+    # ===== 핵심 변경사항: 파이썬의 st.button 대신 HTML/JS 네이티브 버튼 사용 =====
+    # 사용자가 입력한 데이터를 파이썬 세션에 먼저 저장하기 위한 숨겨진 연산 처리
+    
+    if st.button("✅ 출발지/도착지 데이터 계산 준비", use_container_width=True, key="m3_prepare_btn"):
+         if not selected_m3_start or not selected_m3_end:
             st.error("출발지와 목적지 주소를 검색 후 선택 완료해 주십시오.")
-        elif not contact_in:
+         elif not contact_in:
             st.error("수신자 연락처를 입력해 주십시오.")
-        else:
-            with st.spinner("교통 정보 분석 및 전송 준비 중..."):
-                try:
+         else:
+             with st.spinner("교통 정보 분석 중..."):
+                 try:
                     s_idx = m3_start_options.index(selected_m3_start)
                     e_idx = m3_end_options.index(selected_m3_end)
                     o_lat, o_lon = float(st.session_state.m3_start_results[s_idx]['y']), float(st.session_state.m3_start_results[s_idx]['x'])
@@ -410,73 +412,56 @@ elif 선택메뉴 == "3. 출발 알리미":
                     
                     _, dur, _ = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
                     if dur:
-                        # 1. ETA 계산
                         eta_time = datetime.now() + timedelta(minutes=dur)
                         eta_str = eta_time.strftime('%H시 %M분')
-                        
-                        # 텍스트에 들어갈 이름 추출
                         target_name = contact_in.split(" ")[0] if " " in contact_in else contact_in
                         
-                        # 출발지/목적지 정보가 추가된 최종 메시지 구성
                         final_msg = f"[{target_name}님 출발 알림]\n지금 퇴근 후 출발합니다.\n\n📍 출발: {selected_m3_start}\n🚩 도착: {selected_m3_end}\n\n🚗 도착 예정 시간: {eta_str}\n(실시간 교통망 기준 약 {int(dur)}분 소요 예상)"
-                        
-                        # 2. 전화번호만 필터링
                         phone_number = "".join(filter(str.isdigit, contact_in))
                         
-                        # 3. SMS 프로토콜 및 특수문자 안전 인코딩
-                        encoded_msg = urllib.parse.quote(final_msg)
-                        
-                        # 안드로이드 인텐트 호출 구문 (가장 강력한 강제 실행)
-                        intent_uri = f"intent://send?address={phone_number}&sms_body={encoded_msg}#Intent;action=android.intent.action.SENDTO;scheme=sms;end"
-                        
-                        st.success("✅ 연산 완료! 문자 앱을 자동으로 호출합니다.")
-                        st.code(final_msg, language="text")
-                        
-                        # 4. OS 강제 명령을 위한 투명 링크 자동 클릭 스크립트 적용 (보안 무력화)
-                        force_sms_js = f"""
-                        <script>
-                        window.onload = function() {{
-                            var link = document.createElement('a');
-                            link.href = "{intent_uri}";
-                            link.target = "_top"; // Iframe 밖으로 탈출
-                            document.body.appendChild(link);
-                            
-                            // 시스템 단의 자동 터치 유발
-                            link.click();
-                            
-                            // 만약 안드로이드 intent가 실패하면 표준 sms uri로 폴백
-                            setTimeout(function() {{
-                                var fallback = document.createElement('a');
-                                fallback.href = "sms:{phone_number}?body={encoded_msg}";
-                                fallback.target = "_top";
-                                document.body.appendChild(fallback);
-                                fallback.click();
-                            }}, 1000);
-                        }};
-                        </script>
-                        
-                        <a href="sms:{phone_number}?body={encoded_msg}" target="_top" style="
-                            display: block;
-                            width: 100%;
-                            box-sizing: border-box;
-                            text-align: center;
-                            background-color: #007aff;
-                            color: #ffffff;
-                            border: none;
-                            padding: 15px 0;
-                            border-radius: 8px;
-                            font-size: 16px;
-                            font-weight: bold;
-                            text-decoration: none;
-                            font-family: sans-serif;
-                            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-                        ">
-                            💬 문자 앱 열고 전송하기 (수동)
-                        </a>
-                        """
-                        components.html(force_sms_js, height=80)
-                        
-                    else: 
+                        st.session_state.notify_data = {
+                            "ready": True, 
+                            "msg": final_msg, 
+                            "phone": phone_number
+                        }
+                        st.success("데이터 계산 완료. 아래 버튼을 눌러 문자를 발송하십시오.")
+                    else:
                         st.error("교통정보를 획득하지 못했습니다.")
-                except Exception as e:
-                    st.error("연산 처리 중 오류가 발생했습니다.")
+                 except Exception as e:
+                     st.error("연산 처리 중 오류가 발생했습니다.")
+
+    st.markdown("---")
+    
+    # 데이터가 준비되었을 때만 네이티브 링크 버튼 출력
+    if st.session_state.notify_data and st.session_state.notify_data.get("ready"):
+        n_res = st.session_state.notify_data
+        
+        st.markdown("#### 📋 발송 내용 확인")
+        st.code(n_res['msg'], language="text")
+        
+        encoded_msg = urllib.parse.quote(n_res['msg'])
+        phone_num = n_res['phone']
+        
+        # 보안을 뚫는 가장 확실한 방법: 순수 HTML <a> 태그와 target="_top"의 결합.
+        # 이 버튼을 누르면 사용자의 명시적 클릭이므로 무조건 문자 앱이 열립니다.
+        native_btn_html = f"""
+        <a href="sms:{phone_num}?body={encoded_msg}" target="_top" style="
+            display: block;
+            width: 100%;
+            box-sizing: border-box;
+            text-align: center;
+            background-color: #007aff;
+            color: #ffffff;
+            border: none;
+            padding: 15px 0;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            text-decoration: none;
+            font-family: sans-serif;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        ">
+            💬 문자 앱 열고 자동 전송하기
+        </a>
+        """
+        components.html(native_btn_html, height=80)
