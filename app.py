@@ -358,7 +358,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미 (HTML a태그 기반 안정화)
+# 6. 모듈 3: 출발 알리미 (표준 마크다운 링크 적용)
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
@@ -435,23 +435,6 @@ elif 선택메뉴 == "3. 출발 알리미":
         encoded_msg = urllib.parse.quote(n_res['msg'])
         phone_num = n_res['phone']
         
-        # 순수 HTML a 태그. Iframe 외부의 스트림릿 메인 DOM에 직접 삽입되어 보안 정책을 우회.
-        html_link = f"""
-        <a href="sms:{phone_num}?body={encoded_msg}" style="
-            display: block;
-            width: 100%;
-            padding: 15px 0;
-            background-color: #007aff;
-            color: #ffffff;
-            text-align: center;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: bold;
-            text-decoration: none;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            margin-top: 10px;
-        ">
-            💬 시스템 기본 문자 앱으로 전송하기
-        </a>
-        """
-        st.markdown(html_link, unsafe_allow_code=True)
+        # 순수 마크다운 문법을 이용한 안전한 하이퍼링크 생성 (보안 충돌 원천 차단)
+        sms_url = f"sms:{phone_num}?body={encoded_msg}"
+        st.markdown(f"### [💬 여기를 터치하여 문자 앱으로 전송하기]({sms_url})")
