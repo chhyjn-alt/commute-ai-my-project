@@ -6,6 +6,7 @@ import streamlit as st
 import folium
 import time
 import polyline
+import urllib.parse # 문자 메시지 특수문자 변환용 라이브러리 추가
 from datetime import datetime, timedelta
 from streamlit_folium import st_folium
 import streamlit.components.v1 as components
@@ -15,7 +16,6 @@ import streamlit.components.v1 as components
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
 
-# 리셋 방지용 필수 세션 키 생성
 initial_session_keys = {
     'num_people': 3,
     'favorite_contact': "",
@@ -353,14 +353,14 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
                         "종류": r.get('category_name', '').split('>')[-1].strip(),
                         "주소": addr, "링크": r['place_url']
                     })
-                st.dataframe(pd.DataFrame(rest_list), column_config={"リンク": st.column_config.LinkColumn("🔗 지도")}, hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(rest_list), column_config={"링크": st.column_config.LinkColumn("🔗 지도")}, hide_index=True, use_container_width=True)
             else:
                 st.info(f"지정한 반경({d_res['radius']}m) 내에 검색된 맛집이 없습니다.")
         except:
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미 (SMS 기본 문자 앱 연동 체계)
+# 6. 모듈 3: 출발 알리미 (원클릭 자동 산출 + 문자 앱 자동 전송 통합)
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
@@ -389,78 +389,82 @@ elif 선택메뉴 == "3. 출발 알리미":
         selected_m3_end = None
 
     st.markdown("---")
-    contact_in = st.text_input("수신자 연락처 고정", value=st.session_state.favorite_contact, placeholder="예: 01012345678", key="m3_contact_input")
+    # 수신자 이름과 번호를 혼합 입력해도 시스템이 자동 분리
+    contact_in = st.text_input("수신자 연락처 고정 (이름+번호)", value=st.session_state.favorite_contact, placeholder="예: 배우자 01012345678", key="m3_contact_input")
     if st.button("⭐️ 즐겨찾기 등록", use_container_width=True, key="m3_fav_btn"):
         st.session_state.favorite_contact = contact_in
         st.success("즐겨찾기로 등록되었습니다.")
         
-    if st.button("⏱️ 실시간 ETA 메시지 생성", type="primary", use_container_width=True, key="m3_run_btn"):
+    # ===== 핵심: 산출 및 자동 전송을 하나의 버튼으로 통합 =====
+    if st.button("⏱️ 결과 산출 및 자동 문자 전송", type="primary", use_container_width=True, key="m3_run_btn"):
         if not selected_m3_start or not selected_m3_end:
             st.error("출발지와 목적지 주소를 검색 후 선택 완료해 주십시오.")
+        elif not contact_in:
+            st.error("수신자 연락처를 입력해 주십시오.")
         else:
-            try:
-                s_idx = m3_start_options.index(selected_m3_start)
-                e_idx = m3_end_options.index(selected_m3_end)
-                o_lat, o_lon = float(st.session_state.m3_start_results[s_idx]['y']), float(st.session_state.m3_start_results[s_idx]['x'])
-                d_lat, d_lon = float(st.session_state.m3_end_results[e_idx]['y']), float(st.session_state.m3_end_results[e_idx]['x'])
-                
-                _, dur, _ = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
-                if dur:
-                    eta_time = datetime.now() + timedelta(minutes=dur)
-                    st.session_state.notify_data = {"eta": eta_time.strftime('%H시 %M분'), "dur": int(dur), "target": contact_in}
-                else: 
-                    st.error("교통정보를 획득하지 못했습니다.")
-            except:
-                st.error("연산 처리 중 오류가 발생했습니다.")
-
-    st.markdown("---")
-    if st.session_state.notify_data:
-        n_res = st.session_state.notify_data
-        
-        # 줄바꿈 문자를 포함한 실제 텍스트 메시지 구성
-        msg_text = f"[출발 알림]\n지금 퇴근 후 출발합니다.\n🚗 도착 예정 시간: {n_res['eta']}\n(실시간 교통망 기준 약 {n_res['dur']}분 소요 예상)"
-        
-        st.markdown("#### 📋 전송 내용 확인")
-        st.code(msg_text, language="text")
-        
-        # 하드웨어 레벨의 기본 SMS 앱 강제 호출 스크립트 (iframe 격리 탈출 적용)
-        sms_js = f"""
-        <script>
-        function openDefaultSMS() {{
-            const msg = `{msg_text}`;
-            const rawTarget = `{n_res['target']}`;
-            
-            // 번호 외에 이름이 포함되어 있을 경우를 대비해 숫자만 필터링 가공
-            const phoneNumber = rawTarget.replace(/[^0-9]/g, '');
-            
-            // 모바일 표준 SMS 인텐트 URI 구성 (자동 인코딩 처리)
-            const smsUri = 'sms:' + phoneNumber + '?body=' + encodeURIComponent(msg);
-            
-            try {{
-                window.top.location.href = smsUri;
-            }} catch(e) {{
-                const a = document.createElement('a');
-                a.href = smsUri;
-                a.target = '_top';
-                document.body.appendChild(a);
-                a.click();
-            }}
-        }}
-        </script>
-        <button onclick="openDefaultSMS()" style="
-            width: 100%;
-            background-color: #007aff;
-            color: #ffffff;
-            border: none;
-            padding: 15px 20px;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            margin-top: 10px;
-        ">
-            💬 기본 문자 앱 열고 자동 전송하기
-        </button>
-        """
-        components.html(sms_js, height=80)
+            with st.spinner("교통 정보 분석 및 전송 준비 중..."):
+                try:
+                    s_idx = m3_start_options.index(selected_m3_start)
+                    e_idx = m3_end_options.index(selected_m3_end)
+                    o_lat, o_lon = float(st.session_state.m3_start_results[s_idx]['y']), float(st.session_state.m3_start_results[s_idx]['x'])
+                    d_lat, d_lon = float(st.session_state.m3_end_results[e_idx]['y']), float(st.session_state.m3_end_results[e_idx]['x'])
+                    
+                    _, dur, _ = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
+                    if dur:
+                        # 1. ETA 계산 및 문자 내용 조합
+                        eta_time = datetime.now() + timedelta(minutes=dur)
+                        eta_str = eta_time.strftime('%H시 %M분')
+                        
+                        # 텍스트에 들어갈 이름 추출 (공백 기준 첫 단어)
+                        target_name = contact_in.split(" ")[0] if " " in contact_in else contact_in
+                        
+                        final_msg = f"[{target_name}님 출발 알림]\n지금 퇴근 후 출발합니다.\n🚗 도착 예정 시간: {eta_str}\n(실시간 교통망 기준 약 {int(dur)}분 소요 예상)"
+                        
+                        # 2. 전화번호만 자동으로 추출 필터링
+                        phone_number = "".join(filter(str.isdigit, contact_in))
+                        
+                        # 3. SMS 규격에 맞게 특수문자 안전 인코딩
+                        encoded_msg = urllib.parse.quote(final_msg)
+                        sms_uri = f"sms:{phone_number}?body={encoded_msg}"
+                        
+                        st.success("✅ 연산 완료! 문자 앱을 자동으로 호출합니다.")
+                        st.code(final_msg, language="text")
+                        
+                        # 4. 문자 앱 자동 실행 스크립트 + 수동 백업 버튼 (Iframe 탈출 동시 적용)
+                        auto_sms_js = f"""
+                        <script>
+                        // 페이지가 로딩되자마자 최상위 시스템을 통해 즉시 문자앱 실행
+                        window.onload = function() {{
+                            try {{
+                                window.top.location.href = "{sms_uri}";
+                            }} catch(e) {{
+                                console.log("자동 실행 차단됨, 수동 버튼 사용 대기");
+                            }}
+                        }};
+                        </script>
+                        
+                        <a href="{sms_uri}" target="_top" style="
+                            display: block;
+                            width: 100%;
+                            box-sizing: border-box;
+                            text-align: center;
+                            background-color: #007aff;
+                            color: #ffffff;
+                            border: none;
+                            padding: 15px 0;
+                            border-radius: 8px;
+                            font-size: 16px;
+                            font-weight: bold;
+                            text-decoration: none;
+                            font-family: sans-serif;
+                            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+                        ">
+                            💬 문자 앱이 자동으로 안 열리면 누르세요
+                        </a>
+                        """
+                        components.html(auto_sms_js, height=80)
+                        
+                    else: 
+                        st.error("교통정보를 획득하지 못했습니다.")
+                except Exception as e:
+                    st.error("연산 처리 중 오류가 발생했습니다.")
