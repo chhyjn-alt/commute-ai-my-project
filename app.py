@@ -11,18 +11,11 @@ from streamlit_folium import st_folium
 import streamlit.components.v1 as components
 
 # ==========================================
-# 1. 페이지 설정 및 당겨서 새로고침 원천 차단
+# 1. 페이지 설정 및 세션 상태 초기화 (CSS 충돌 코드 완전 삭제됨)
 # ==========================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
 
-st.markdown("""
-    <style>
-    html, body, [data-testid="stAppViewContainer"], .stApp {
-        overscroll-behavior-y: none !important;
-    }
-    </style>
-""", unsafe_allow_code=True)
-
+# 리셋 방지용 필수 세션 키 생성
 initial_session_keys = {
     'num_people': 3,
     'favorite_contact': "",
@@ -367,7 +360,7 @@ elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
             st.caption("결과 화면을 동기화 중입니다.")
 
 # ==========================================
-# 6. 모듈 3: 출발 알리미 (Iframe 브레이크아웃 적용)
+# 6. 모듈 3: 출발 알리미
 # ==========================================
 elif 선택메뉴 == "3. 출발 알리미":
     st.markdown("### 💬 출발 알리미")
@@ -425,53 +418,3 @@ elif 선택메뉴 == "3. 출발 알리미":
         n_res = st.session_state.notify_data
         
         final_msg = f"[{n_res['target']}님 출발 알림]\\n지금 퇴근 후 출발합니다.\\n🚗 도착 예정 시간: {n_res['eta']}\\n(실시간 교통망 기준 약 {n_res['dur']}분 소요 예상)"
-        
-        st.markdown("#### 💬 카카오톡 즉시 전송")
-        
-        # Streamlit iframe(유리방) 탈출 및 안드로이드 시스템 직접 명령 스크립트 적용
-        share_js = f"""
-        <script>
-        function copyAndOpenKakao() {{
-            const msg = `{final_msg}`;
-            
-            // 1. 클립보드에 안내 메시지 몰래 복사
-            const textarea = document.createElement('textarea');
-            textarea.value = msg.replace(/\\\\n/g, '\\n');
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand('copy');
-            document.body.removeChild(textarea);
-            
-            alert("✅ 안내 멘트가 복사되었습니다!\\n\\n카카오톡이 켜지면 원하는 대화방에 [붙여넣기] 하세요.");
-            
-            // 2. iframe 탈출 후 최상단 부모 창(스마트폰 시스템)에 직접 카카오톡 호출 명령
-            try {{
-                window.top.location.href = 'kakaotalk://';
-            }} catch(e) {{
-                // 모바일 브라우저의 강력한 보안 정책으로 최상단 접근이 차단될 경우를 대비한 우회 접속(a태그)
-                const a = document.createElement('a');
-                a.href = 'kakaotalk://';
-                a.target = '_top';
-                document.body.appendChild(a);
-                a.click();
-            }}
-        }}
-        </script>
-        <button onclick="copyAndOpenKakao()" style="
-            width: 100%;
-            background-color: #FEE500;
-            color: #3C1E1E;
-            border: none;
-            padding: 15px 20px;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            margin-top: 10px;
-        ">
-            💬 카카오톡 열고 붙여넣기
-        </button>
-        """
-        
-        components.html(share_js, height=100)
