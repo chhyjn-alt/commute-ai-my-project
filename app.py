@@ -1,444 +1,317 @@
-import math
-import random
+"""
+=========================================================
+회식 장소 최적 위치 산출 프로그램 (v3)
+- 참석자 주소 기반 이동 반경 교집합 탐색
+- 교집합 내 실제 상권(식당/카페/주점) 좌표로 마커 위치 보정(Snap)
+
+[원본(v2) 대비 주요 개선 사항]
+1. 지오코딩 캐싱 + RateLimiter 적용
+   → 같은 주소 재계산 시 즉시 응답, Nominatim 사용 정책(1req/sec) 준수로 차단 방지
+2. Overpass API 다중 미러 서버 + 재시도 로직
+   → 메인 서버 혼잡/장애 시에도 다른 서버로 자동 전환하여 상권 데이터 수집
+3. 격자 탐색을 NumPy 벡터 연산(meshgrid)으로 전환
+   → 이중 for문 제거, 반경/해상도가 커져도 안정적인 속도 유지
+4. "교집합 2명 이상일 때만 POI 보정" 제약 제거
+   → 원본은 1명만 겹쳐도 보정이 전혀 안 됐음. 이제 겹침이 1명이라도 상권 보정 적용
+5. 동률 후보가 다수인데 주변 상권 정보가 전혀 없는 경우,
+   임의의 첫 번째 점이 아니라 동률 후보들의 기하학적 중심으로 대체 → 결과 안정성 향상
+6. 반경 크기에 따라 격자 해상도를 자동 조절
+   → 넓은 범위는 과도하게 세밀한 격자로 인한 연산 지연 방지, 좁은 범위는 더 세밀하게
+7. 입력 검증(최소 2명) 및 단계별 진행 메시지(①~④) 추가로 디버깅/시연 가독성 향상
+=========================================================
+"""
+
+import time
 import requests
-import pandas as pd
-import streamlit as st
+import numpy as np
 import folium
-import polyline
-import urllib.parse
-from datetime import datetime, timedelta
-from streamlit_folium import st_folium
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
 
-# ==========================================
-# 1. 페이지 설정 및 상태 초기화
-# ==========================================
-st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
+# ---------------------------------------------------------
+# 1. 지오코딩: 캐싱 + Rate Limiter
+# ---------------------------------------------------------
+_geolocator = Nominatim(user_agent="colab_ai_class_poi_v3")
+_geocode_limited = RateLimiter(_geolocator.geocode, min_delay_seconds=1.1)
+_geocode_cache = {}
 
-initial_session_keys = {
-    'num_people': 3,
-    'favorite_contact': "",
-    'commute_data': None,
-    'dinner_data': None,
-    'notify_data': None,
-    'm1_start_results': [],
-    'm1_end_results': [],
-    'm3_start_results': [],
-    'm3_end_results': []
-}
 
-for key, default_value in initial_session_keys.items():
-    if key not in st.session_state:
-        st.session_state[key] = default_value
+def get_lat_lon(address: str):
+    """주소 텍스트를 위도, 경도 좌표로 변환 (캐싱 적용)"""
+    address = address.strip()
+    if not address:
+        return None
+    if address in _geocode_cache:
+        return _geocode_cache[address]
 
-str_kakao_rest_key = "df68bf65618592b6d685caec6521432f"
+    queries = [address]
+    if "대한민국" not in address:
+        queries.append(f"대한민국 {address}")
 
-# ==========================================
-# 2. 핵심 네트워크 API 정의
-# ==========================================
-def search_kakao_address(query):
-    if not query or not query.strip():
-        return []
-    url = "https://dapi.kakao.com/v2/local/search/address.json"
-    headers = {"Authorization": f"KakaoAK {str_kakao_rest_key}"}
-    params = {"query": query, "size": 10}
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=3).json()
-        return res.get('documents', [])
-    except:
-        return []
-
-@st.cache_data
-def get_realtime_weather_and_temp():
-    try:
-        res = requests.get("https://api.open-meteo.com/v1/forecast?latitude=36.8065&longitude=127.1522&current_weather=true&timezone=auto", timeout=3).json()
-        current = res.get('current_weather', {})
-        code = current.get('weathercode', 0)
-        temp = current.get('temperature', 20.0)
-        if code in [0, 1, 2, 3]: desc = "맑음/구름"
-        elif code in [51, 53, 55, 61, 63, 65, 80, 81, 82]: desc = "비 (강수)"
-        elif code in [71, 73, 75, 85, 86]: desc = "눈 (결빙)"
-        else: desc = "기타"
-        return desc, temp
-    except:
-        return "수집 실패", 20.0
-
-@st.cache_data
-def get_kakao_navi_baseline(origin_lat, origin_lon, dest_lat, dest_lon):
-    url = "https://apis-navi.kakaomobility.com/v1/directions"
-    headers = {"Authorization": f"KakaoAK {str_kakao_rest_key}"}
-    params = {"origin": f"{origin_lon},{origin_lat}", "destination": f"{dest_lon},{dest_lat}", "priority": "RECOMMEND"}
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=3).json()
-        routes = res.get('routes', [])
-        if routes and routes[0].get('result_code') == 0:
-            summary = routes[0]['summary']
-            dist = summary['distance'] / 1000
-            dur = summary['duration'] / 60
-            path = []
-            for section in routes[0].get('sections', []):
-                for road in section.get('roads', []):
-                    for i in range(0, len(road.get('vertexes', [])), 2):
-                        path.append([road['vertexes'][i+1], road['vertexes'][i]])
-            return round(dist, 1), round(dur, 1), path
-    except:
-        pass
-    return None, None, []
-
-def get_real_road_path(waypoints):
-    coord_str = ";".join([f"{lon},{lat}" for lat, lon in waypoints])
-    url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=polyline"
-    try:
-        res = requests.get(url, timeout=3).json()
-        routes = res.get('routes', [])
-        if routes:
-            return polyline.decode(routes[0]['geometry'])
-    except:
-        pass
-    return waypoints 
-
-def get_kakao_restaurants(lat, lon, radius_m):
-    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
-    headers = {"Authorization": f"KakaoAK {str_kakao_rest_key}"}
-    params = {"query": "맛집", "category_group_code": "FD6", "x": str(lon), "y": str(lat), "radius": int(radius_m), "sort": "accuracy"}
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=3).json()
-        return res.get('documents', [])[:5]
-    except:
-        return []
-
-# ==========================================
-# 3. 사이드바 내비게이션
-# ==========================================
-with st.sidebar:
-    st.markdown("### ⚙️ 시스템 메뉴")
-    선택메뉴 = st.selectbox("프로그램 선택", ["1. 퇴근시간 최적화 AI", "2. 회식장소 최적위치 산출기", "3. 출발 알리미"], key="main_menu_select")
-
-# ==========================================
-# 4. 모듈 1: 퇴근시간 최적화 AI
-# ==========================================
-if 선택메뉴 == "1. 퇴근시간 최적화 AI":
-    st.markdown("### 🚗 퇴근시간 최적화 AI")
-    
-    with st.sidebar:
-        st.markdown("#### 주소 검색 및 선택")
-        m1_start_q = st.text_input("출발지 검색어 입력", "탕정 삼성로", key="m1_start_q")
-        if st.button("출발지 주소 검색", key="m1_start_btn", use_container_width=True):
-            st.session_state.m1_start_results = search_kakao_address(m1_start_q)
-        
-        m1_start_options = [doc['address_name'] for doc in st.session_state.m1_start_results]
-        if m1_start_options:
-            selected_m1_start = st.selectbox("정확한 출발지 주소 선택", m1_start_options, key="m1_start_select")
-        else:
-            st.caption("검색 결과가 없습니다.")
-            selected_m1_start = None
-
-        st.markdown("---")
-        m1_end_q = st.text_input("목적지 검색어 입력", "천안 성황로", key="m1_end_q")
-        if st.button("목적지 주소 검색", key="m1_end_btn", use_container_width=True):
-            st.session_state.m1_end_results = search_kakao_address(m1_end_q)
-            
-        m1_end_options = [doc['address_name'] for doc in st.session_state.m1_end_results]
-        if m1_end_options:
-            selected_m1_end = st.selectbox("정확한 목적지 주소 선택", m1_end_options, key="m1_end_select")
-        else:
-            st.caption("검색 결과가 없습니다.")
-            selected_m1_end = None
-
-        st.markdown("---")
-        탐색_시작 = st.time_input("시작시간", datetime.strptime("17:30", "%H:%M").time(), key="m1_time_start")
-        탐색_종료 = st.time_input("종료시간", datetime.strptime("19:00", "%H:%M").time(), key="m1_time_end")
-        
-        if st.button("🔍 고밀도 스캔 실행", type="primary", use_container_width=True, key="m1_run_btn"):
-            if not selected_m1_start or not selected_m1_end:
-                st.error("출발지와 목적지 주소를 검색 후 선택해 주십시오.")
-            else:
-                with st.spinner("트래픽 분석 중..."):
-                    try:
-                        s_idx = m1_start_options.index(selected_m1_start)
-                        e_idx = m1_end_options.index(selected_m1_end)
-                        o_lat, o_lon = float(st.session_state.m1_start_results[s_idx]['y']), float(st.session_state.m1_start_results[s_idx]['x'])
-                        d_lat, d_lon = float(st.session_state.m1_end_results[e_idx]['y']), float(st.session_state.m1_end_results[e_idx]['x'])
-                        
-                        dist_b, dur_b, path_k = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
-                        w_desc, temp_val = get_realtime_weather_and_temp()
-                        
-                        if dur_b:
-                            # KST (한국 표준시) 동기화 적용
-                            now_kst = datetime.utcnow() + timedelta(hours=9)
-                            c_hour = now_kst.hour + now_kst.minute / 60.0
-                            
-                            c_peak = math.exp(-((c_hour - 18.25) ** 2) / 0.04) if c_hour <= 18.25 else math.exp(-((c_hour - 18.25) ** 2) / 0.12)
-                            base_A = dur_b / (1.0 + c_peak * 1.2)
-                            base_B = base_A * 1.15
-                            
-                            today = now_kst
-                            start_dt = datetime(today.year, today.month, today.day, 탐색_시작.hour, 탐색_시작.minute)
-                            end_dt = datetime(today.year, today.month, today.day, 탐색_종료.hour, 탐색_종료.minute)
-                            
-                            options = []
-                            current = start_dt
-                            random.seed(int(start_dt.timestamp()))
-                            
-                            while current <= end_dt:
-                                h_val = current.hour + current.minute / 60.0
-                                peak = math.exp(-((h_val - 18.25) ** 2) / 0.04) if h_val <= 18.25 else math.exp(-((h_val - 18.25) ** 2) / 0.12)
-                                noise = random.uniform(-1.0, 1.5)
-                                dur_A, dur_B = base_A * (1.0 + peak * 1.2) + noise, base_B * (1.0 + peak * 0.3) + (noise * 0.5)
-                                diff_m = abs((current.hour * 60 + current.minute) - (18 * 60 + 10))
-                                penalty = (diff_m ** 1.2) * 0.05
-                                
-                                options.append({"departure_time": current.strftime("%H:%M"), "dt_obj": current, "route_name": "경로A (카카오 최적)", "distance_km": round(dist_b, 1), "duration_min": round(dur_A, 1), "score": dur_A + penalty})
-                                options.append({"departure_time": current.strftime("%H:%M"), "dt_obj": current, "route_name": "경로B (우회도로)", "distance_km": round(dist_b * 1.15, 1), "duration_min": round(dur_B, 1), "score": dur_B + penalty})
-                                current += timedelta(minutes=1)
-                            
-                            df_all = pd.DataFrame(options)
-                            df_all['10분구간'] = df_all['dt_obj'].apply(lambda x: f"{x.replace(minute=(x.minute // 10) * 10).strftime('%H:%M')}~{(x.replace(minute=(x.minute // 10) * 10) + timedelta(minutes=9)).strftime('%H:%M')}")
-                            summary = df_all.sort_values(["10분구간", "score"]).groupby("10분구간", as_index=False).first()
-                            
-                            display_df = summary[["10분구간", "departure_time", "route_name", "duration_min", "distance_km"]].copy()
-                            display_df.columns = ["10분구간", "최적 출발시간", "최고의 경로", "소요시간 (분)", "거리 (km)"]
-                            display_df["날씨"] = w_desc
-                            display_df["온도"] = f"{temp_val} °C"
-                            
-                            st.session_state.commute_data = {"df": display_df, "o_lat": o_lat, "o_lon": o_lon, "d_lat": d_lat, "d_lon": d_lon, "path_k": path_k}
-                        else:
-                            st.error("카카오 맵 경로 서버 통신에 실패했습니다.")
-                    except Exception:
-                        st.error("데이터 파싱 도중 예외가 발생했습니다.")
-
-    if st.session_state.commute_data:
-        c_res = st.session_state.commute_data
-        st.markdown("#### ⏰ 최적 연산 결과")
-        st.dataframe(c_res["df"], use_container_width=True, hide_index=True)
-        selected_window = st.selectbox("🗺️ 지도 연동 구간 선택", c_res["df"]["10분구간"].tolist(), key="m1_map_select")
-        
+    for q in queries:
         try:
-            target_route = c_res["df"][c_res["df"]["10분구간"] == selected_window].iloc[0]["최고의 경로"]
-            st.markdown(f"#### 🗺️ 최적 루트: {target_route}")
-            
-            m = folium.Map(location=[(c_res["o_lat"]+c_res["d_lat"])/2, (c_res["o_lon"]+c_res["d_lon"])/2], zoom_start=12, tiles='CartoDB positron')
-            folium.Marker([c_res["o_lat"], c_res["o_lon"]], popup="출발지").add_to(m)
-            folium.Marker([c_res["d_lat"], c_res["d_lon"]], popup="목적지").add_to(m)
-            
-            if "경로A" in target_route: 
-                folium.PolyLine(locations=c_res["path_k"], color='#dc3545', weight=6).add_to(m)
-            else:
-                path_o = get_real_road_path([[c_res["o_lat"], c_res["o_lon"]], [36.8200, 127.1100], [c_res["d_lat"], c_res["d_lon"]]])
-                folium.PolyLine(locations=path_o, color='#28a745', weight=6).add_to(m)
-            st_folium(m, use_container_width=True, height=350, key="map_commute_fixed")
-        except:
-            st.caption("지도를 동기화하는 중입니다.")
+            loc = _geocode_limited(q, timeout=10)
+            if loc:
+                coord = (loc.latitude, loc.longitude)
+                _geocode_cache[address] = coord
+                return coord
+        except Exception:
+            continue
 
-# ==========================================
-# 5. 모듈 2: 회식장소 최적위치 산출기
-# ==========================================
-elif 선택메뉴 == "2. 회식장소 최적위치 산출기":
-    st.markdown("### 🍻 회식장소 추천기")
-    with st.sidebar:
-        st.markdown("#### 참석 인원 제어")
-        b1, b2 = st.columns(2)
-        if b1.button("➕ 추가", key="m2_add_p"): st.session_state.num_people += 1
-        if b2.button("➖ 감소", key="m2_sub_p") and st.session_state.num_people > 2: st.session_state.num_people -= 1
-        st.markdown("---")
-        search_radius = st.slider("🎯 탐색 반경 (m)", min_value=100, max_value=2000, value=500, step=100, key="m2_radius_slider")
+    _geocode_cache[address] = None
+    return None
 
-    st.markdown("#### 👥 참석자 주소 검색")
-    addresses = []
-    
-    for i in range(st.session_state.num_people):
-        st.markdown(f"**참석자 {i+1} 설정**")
-        p_query = st.text_input(f"참석자 {i+1} 도로명/건물명 검색", key=f"m2_p_query_{i}")
-        
-        if st.button(f"참석자 {i+1} 주소 조회", key=f"m2_p_btn_{i}"):
-            st.session_state[f"m2_p_res_{i}"] = search_kakao_address(p_query)
-            
-        p_res = st.session_state.get(f"m2_p_res_{i}", [])
-        p_options = [doc['address_name'] for doc in p_res]
-        
-        if p_options:
-            selected_p_addr = st.selectbox(f"참석자 {i+1} 최종 주소 확정", p_options, key=f"m2_p_select_{i}")
-            idx = p_options.index(selected_p_addr)
-            addresses.append({"name": f"참석자 {i+1}", "doc": p_res[idx]})
-        else:
-            st.caption("주소를 검색한 뒤 선택해 주십시오.")
-        st.markdown("---")
-        
-    if st.button("🔍 최적 위치 및 맛집 산출", type="primary", use_container_width=True, key="m2_run_btn"):
-        if len(addresses) < st.session_state.num_people:
-            st.error("모든 참석자의 주소를 검색 후 선택 완료해야 계산이 가능합니다.")
-        else:
-            with st.spinner("중심점 연산 중..."):
-                valid_locations = []
-                for p in addresses:
-                    try:
-                        lat = float(p["doc"]['y'])
-                        lon = float(p["doc"]['x'])
-                        valid_locations.append({"name": p["name"], "lat": lat, "lon": lon})
-                    except:
-                        pass
-                
-                if valid_locations:
-                    avg_lat = sum(l["lat"] for l in valid_locations) / len(valid_locations)
-                    avg_lon = sum(l["lon"] for l in valid_locations) / len(valid_locations)
-                    
-                    candidates = []
-                    lat_off = 3 / 111.0 
-                    lon_off = 3 / (111.0 * math.cos(math.radians(avg_lat)))
-                    for i in range(3):
-                        for j in range(3):
-                            candidates.append((avg_lat - lat_off + (2 * lat_off * i / 2), avg_lon - lon_off + (2 * lon_off * j / 2)))
-                    
-                    sources = [(l["lat"], l["lon"]) for l in valid_locations]
-                    coords = sources + candidates
-                    coord_str = ";".join([f"{lon},{lat}" for lat, lon in coords])
-                    src_str = ";".join(map(str, range(len(sources))))
-                    dst_str = ";".join(map(str, range(len(sources), len(coords))))
-                    
-                    try:
-                        res = requests.get(f"http://router.project-osrm.org/table/v1/driving/{coord_str}?sources={src_str}&destinations={dst_str}", timeout=3).json()
-                        durations = res.get('durations', [])
-                    except: durations = []
-                    
-                    best_idx, min_max = 0, float('inf')
-                    best_times = []
-                    if durations:
-                        for d_idx in range(len(candidates)):
-                            times = [durations[s_idx][d_idx] for s_idx in range(len(sources))]
-                            if None in times: continue
-                            if max(times) < min_max:
-                                min_max = max(times)
-                                best_idx = d_idx
-                                best_times = times
-                    
-                    b_lat, b_lon = candidates[best_idx]
-                    rests = get_kakao_restaurants(b_lat, b_lon, search_radius)
-                    
-                    st.session_state.dinner_data = {
-                        "valid_locations": valid_locations, "b_lat": b_lat, "b_lon": b_lon,
-                        "best_times": best_times, "rests": rests, "radius": search_radius
-                    }
 
-    if st.session_state.dinner_data:
-        d_res = st.session_state.dinner_data
-        st.markdown("#### 🗺️ 위치 분석 결과")
-        
-        if d_res.get("best_times"):
-            for idx, loc in enumerate(d_res["valid_locations"]):
-                st.markdown(f"⏱️ **{loc['name']} 소요시간**: 약 {int(d_res['best_times'][idx]//60)}분")
-        
+# ---------------------------------------------------------
+# 2. 상권 POI 수집: 다중 미러 서버 + 재시도
+# ---------------------------------------------------------
+_OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
+
+
+def get_commercial_pois(lat_min, lat_max, lon_min, lon_max):
+    """지정 범위 내 상업 시설(식당/카페/주점/펍) 좌표 수집"""
+    query = f"""
+    [out:json][timeout:25];
+    (
+      node["amenity"="restaurant"]({lat_min},{lon_min},{lat_max},{lon_max});
+      node["amenity"="cafe"]({lat_min},{lon_min},{lat_max},{lon_max});
+      node["amenity"="bar"]({lat_min},{lon_min},{lat_max},{lon_max});
+      node["amenity"="pub"]({lat_min},{lon_min},{lat_max},{lon_max});
+    );
+    out center;
+    """
+    for url in _OVERPASS_MIRRORS:
         try:
-            m = folium.Map(location=[d_res["b_lat"], d_res["b_lon"]], zoom_start=14, tiles='CartoDB positron')
-            for l in d_res["valid_locations"]:
-                folium.Marker([l["lat"], l["lon"]], popup=l["name"]).add_to(m)
-                folium.PolyLine([[l["lat"], l["lon"]], [d_res["b_lat"], d_res["b_lon"]]], color="gray", weight=2, dash_array='5, 5').add_to(m)
-            
-            folium.Circle(
-                location=[d_res["b_lat"], d_res["b_lon"]], radius=int(d_res["radius"]), color='#0052cc',
-                fill=True, fill_color='#0052cc', fill_opacity=0.3, weight=2
+            resp = requests.get(url, params={"data": query}, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            pois = [[el["lat"], el["lon"]] for el in data.get("elements", []) if "lat" in el]
+            return np.array(pois) if pois else np.array([])
+        except Exception:
+            time.sleep(0.4)
+            continue
+    return np.array([])
+
+
+# ---------------------------------------------------------
+# 3. 반경 크기에 따른 격자 해상도 자동 조절
+# ---------------------------------------------------------
+def adaptive_grid_size(radius_km: float) -> int:
+    if radius_km <= 2:
+        return 150
+    elif radius_km <= 5:
+        return 110
+    else:
+        return 80
+
+
+# ---------------------------------------------------------
+# 4. 벡터화된 교집합 격자 탐색 (핵심 성능 개선)
+# ---------------------------------------------------------
+def find_overlap_grid(valid_coords, radius_km):
+    lats, lons = zip(*valid_coords)
+    margin = (radius_km / 111.0) + 0.01
+    lat_min, lat_max = min(lats) - margin, max(lats) + margin
+    lon_min, lon_max = min(lons) - margin, max(lons) + margin
+
+    grid_size = adaptive_grid_size(radius_km)
+    grid_lats = np.linspace(lat_min, lat_max, grid_size)
+    grid_lons = np.linspace(lon_min, lon_max, grid_size)
+    glat_mesh, glon_mesh = np.meshgrid(grid_lats, grid_lons, indexing="ij")
+
+    overlap_count = np.zeros_like(glat_mesh, dtype=int)
+    for lat, lon in valid_coords:
+        dist = np.sqrt(
+            ((glat_mesh - lat) * 111.0) ** 2
+            + ((glon_mesh - lon) * 111.0 * np.cos(np.radians(lat))) ** 2
+        )
+        overlap_count += (dist <= radius_km)
+
+    max_overlap = int(overlap_count.max())
+    mask = overlap_count == max_overlap
+    overlap_points = list(zip(glat_mesh[mask].tolist(), glon_mesh[mask].tolist()))
+
+    dlat = grid_lats[1] - grid_lats[0]
+    dlon = grid_lons[1] - grid_lons[0]
+    bounds = (lat_min, lat_max, lon_min, lon_max)
+    return overlap_points, max_overlap, dlat, dlon, bounds
+
+
+# ---------------------------------------------------------
+# 5. 후보 지점 중 상권 밀집도가 가장 높은 곳으로 마커 보정
+# ---------------------------------------------------------
+def snap_to_best_commercial_spot(overlap_points, pois, snap_radius_km=0.3):
+    best_poi_count = -1
+    best_coord = None
+
+    for p_lat, p_lon in overlap_points:
+        if pois.size > 0:
+            dist = np.sqrt(
+                ((pois[:, 0] - p_lat) * 111.0) ** 2
+                + ((pois[:, 1] - p_lon) * 111.0 * np.cos(np.radians(p_lat))) ** 2
+            )
+            nearby = pois[dist <= snap_radius_km]
+            poi_count = len(nearby)
+        else:
+            nearby = np.array([])
+            poi_count = 0
+
+        if poi_count > best_poi_count:
+            best_poi_count = poi_count
+            if poi_count > 0:
+                best_coord = (float(np.mean(nearby[:, 0])), float(np.mean(nearby[:, 1])))
+            else:
+                best_coord = (p_lat, p_lon)
+
+    # 모든 후보의 주변 상권이 0개라면, 임의의 한 점이 아니라
+    # 동률 후보들의 기하학적 중심을 사용해 결과를 더 안정적으로 만든다.
+    if best_poi_count <= 0 and len(overlap_points) > 1:
+        lats = [p[0] for p in overlap_points]
+        lons = [p[1] for p in overlap_points]
+        best_coord = (float(np.mean(lats)), float(np.mean(lons)))
+        best_poi_count = 0
+
+    return best_coord, best_poi_count
+
+
+# ===========================================================
+# 6. UI 위젯 구성
+# ===========================================================
+title = widgets.HTML(
+    "<h2>🍻 회식 장소 최적 위치 산출 프로그램 (v3)</h2>"
+    "<p>참석자 주소와 반경을 입력하고 <b>[정밀 최적 위치 산출]</b> 버튼을 누르세요.</p>"
+)
+
+address_inputs = [
+    widgets.Text(value='충남 천안시 성황로 40', description='참석자 1:', layout={'width': '400px'}),
+    widgets.Text(value='충남 아산시 삼성로 180', description='참석자 2:', layout={'width': '400px'}),
+    widgets.Text(value='충남 천안시 성성6로 21', description='참석자 3:', layout={'width': '400px'}),
+]
+inputs_box = widgets.VBox(address_inputs)
+
+add_btn = widgets.Button(description="➕ 인원 추가", button_style='info')
+radius_slider = widgets.FloatSlider(value=3.0, min=0.5, max=10.0, step=0.5, description='반경(km):')
+calc_btn = widgets.Button(description="🔍 정밀 최적 위치 산출", button_style='primary')
+
+map_output_area = widgets.Output()
+
+
+def add_address(b):
+    new_idx = len(address_inputs) + 1
+    new_input = widgets.Text(placeholder='예: 천안시 불당동', description=f'참석자 {new_idx}:', layout={'width': '400px'})
+    address_inputs.append(new_input)
+    inputs_box.children = tuple(address_inputs)
+
+
+add_btn.on_click(add_address)
+
+
+# ===========================================================
+# 7. 메인 연산 함수
+# ===========================================================
+def calculate_optimal_location(b):
+    with map_output_area:
+        clear_output(wait=True)
+
+        addresses = [w.value.strip() for w in address_inputs if w.value.strip()]
+        if len(addresses) < 2:
+            print("⚠️ 최소 2명 이상의 주소를 입력해야 교집합을 계산할 수 있습니다.")
+            return
+
+        print(f"① 주소 {len(addresses)}건 좌표 변환 중...")
+        valid_coords = []
+        for addr in addresses:
+            coord = get_lat_lon(addr)
+            if coord:
+                valid_coords.append(coord)
+            else:
+                print(f"   - 좌표 변환 실패(오류 주소): {addr}")
+
+        if len(valid_coords) < 2:
+            print("⚠️ 유효한 좌표가 2개 미만이라 교집합을 계산할 수 없습니다.")
+            return
+
+        radius_km = radius_slider.value
+        print(f"② 반경 {radius_km}km 기준 이동 범위 교집합 탐색 중...")
+        overlap_points, max_overlap, dlat, dlon, bounds = find_overlap_grid(valid_coords, radius_km)
+        lat_min, lat_max, lon_min, lon_max = bounds
+
+        print("③ 상권(식당/카페/주점) 데이터 수집 중...")
+        pois = get_commercial_pois(lat_min, lat_max, lon_min, lon_max)
+        print(f"   - 수집된 상권 수: {len(pois)}개")
+
+        print("④ 최적 위치 보정 및 지도 렌더링 중...")
+        final_coord, poi_count = snap_to_best_commercial_spot(overlap_points, pois)
+
+        lats = [c[0] for c in valid_coords]
+        lons = [c[1] for c in valid_coords]
+        center_lat, center_lon = float(np.mean(lats)), float(np.mean(lons))
+
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, width=800, height=520)
+
+        for lat, lon in valid_coords:
+            folium.CircleMarker(
+                location=[lat, lon], radius=5, color='black', fill=True, fill_color='black'
             ).add_to(m)
-            
-            folium.Marker([d_res["b_lat"], d_res["b_lon"]], popup="최적 중심점").add_to(m)
-            for r in d_res["rests"]:
-                folium.Marker([float(r['y']), float(r['x'])], popup=r['place_name']).add_to(m)
-            st_folium(m, use_container_width=True, height=350, key="map_dinner_fixed")
-            
-            st.markdown(f"#### 🍽️ 반경 {d_res['radius']}m 내 맛집")
-            if d_res["rests"]:
-                rest_list = []
-                for idx, r in enumerate(d_res["rests"]):
-                    addr = r.get('road_address_name', '').strip()
-                    if not addr: addr = r.get('address_name', '주소 누락')
-                    rest_list.append({
-                        "순위": f"{idx+1}위", "이름": r['place_name'],
-                        "종류": r.get('category_name', '').split('>')[-1].strip(),
-                        "주소": addr, "링크": r['place_url']
-                    })
-                st.dataframe(pd.DataFrame(rest_list), column_config={"링크": st.column_config.LinkColumn("🔗 지도")}, hide_index=True, use_container_width=True)
-            else:
-                st.info(f"지정한 반경({d_res['radius']}m) 내에 검색된 맛집이 없습니다.")
-        except:
-            st.caption("결과 화면을 동기화 중입니다.")
+            folium.Circle(
+                location=[lat, lon], radius=radius_km * 1000,
+                color='#3186cc', fill=True, fill_color='#3186cc', fill_opacity=0.15, weight=1
+            ).add_to(m)
 
-# ==========================================
-# 6. 모듈 3: 출발 알리미 (KST 동기화 적용)
-# ==========================================
-elif 선택메뉴 == "3. 출발 알리미":
-    st.markdown("### 💬 출발 알리미")
-    
-    st.markdown("#### 경로 및 수신 설정")
-    
-    m3_start_q = st.text_input("출발지 검색어 입력", "탕정 삼성로", key="m3_start_q")
-    if st.button("출발지 검색", key="m3_start_btn", use_container_width=True):
-        st.session_state.m3_start_results = search_kakao_address(m3_start_q)
-        
-    m3_start_options = [doc['address_name'] for doc in st.session_state.m3_start_results]
-    if m3_start_options:
-        selected_m3_start = st.selectbox("출발 주소 선택", m3_start_options, key="m3_start_select")
-    else:
-        selected_m3_start = None
+        # 교집합 영역 렌더링 (브라우저 부담 방지를 위해 최대 600개로 샘플링하여 표시,
+        # 단 최적 위치 계산에는 전체 후보를 사용함)
+        render_points = overlap_points
+        if len(render_points) > 600:
+            step = len(render_points) // 600
+            render_points = render_points[::step]
 
-    st.markdown("---")
-    m3_end_q = st.text_input("목적지 검색어 입력", "천안 성황로", key="m3_end_q")
-    if st.button("목적지 검색", key="m3_end_btn", use_container_width=True):
-        st.session_state.m3_end_results = search_kakao_address(m3_end_q)
-        
-    m3_end_options = [doc['address_name'] for doc in st.session_state.m3_end_results]
-    if m3_end_options:
-        selected_m3_end = st.selectbox("목적 주소 선택", m3_end_options, key="m3_end_select")
-    else:
-        selected_m3_end = None
+        for p_lat, p_lon in render_points:
+            folium.Rectangle(
+                bounds=[(p_lat - dlat / 2, p_lon - dlon / 2), (p_lat + dlat / 2, p_lon + dlon / 2)],
+                color='red', fill=True, fill_color='red', fill_opacity=0.3, weight=0
+            ).add_to(m)
 
-    st.markdown("---")
-    contact_in = st.text_input("수신자 연락처 (이름+번호)", value=st.session_state.favorite_contact, placeholder="예: 배우자 01012345678", key="m3_contact_input")
-    if st.button("⭐️ 즐겨찾기 등록", use_container_width=True, key="m3_fav_btn"):
-        st.session_state.favorite_contact = contact_in
-        st.success("즐겨찾기로 등록되었습니다.")
-        
-    if st.button("✅ 출발지/도착지 데이터 계산", type="primary", use_container_width=True, key="m3_prepare_btn"):
-         if not selected_m3_start or not selected_m3_end:
-            st.error("출발지와 목적지 주소를 검색 후 선택 완료해 주십시오.")
-         elif not contact_in:
-            st.error("수신자 연락처를 입력해 주십시오.")
-         else:
-             with st.spinner("교통 정보 분석 중..."):
-                 try:
-                    s_idx = m3_start_options.index(selected_m3_start)
-                    e_idx = m3_end_options.index(selected_m3_end)
-                    o_lat, o_lon = float(st.session_state.m3_start_results[s_idx]['y']), float(st.session_state.m3_start_results[s_idx]['x'])
-                    d_lat, d_lon = float(st.session_state.m3_end_results[e_idx]['y']), float(st.session_state.m3_end_results[e_idx]['x'])
-                    
-                    _, dur, _ = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
-                    if dur:
-                        # KST (한국 표준시) 동기화 연산
-                        now_kst = datetime.utcnow() + timedelta(hours=9)
-                        eta_time = now_kst + timedelta(minutes=dur)
-                        eta_str = eta_time.strftime('%H시 %M분')
-                        
-                        target_name = contact_in.split(" ")[0] if " " in contact_in else contact_in
-                        
-                        final_msg = f"[{target_name}님 출발 알림]\n지금 퇴근 후 출발합니다.\n\n📍 출발: {selected_m3_start}\n🚩 도착: {selected_m3_end}\n\n🚗 도착 예정 시간: {eta_str}\n(실시간 교통망 기준 약 {int(dur)}분 소요 예상)"
-                        phone_number = "".join(filter(str.isdigit, contact_in))
-                        
-                        st.session_state.notify_data = {
-                            "ready": True, 
-                            "msg": final_msg, 
-                            "phone": phone_number
-                        }
-                    else:
-                        st.error("교통정보를 획득하지 못했습니다.")
-                 except Exception as e:
-                     st.error("연산 처리 중 오류가 발생했습니다.")
+        if final_coord:
+            popup = f"최적 위치 ({max_overlap}명 겹침"
+            popup += f" / 반경 300m 내 상권 {poi_count}개)" if poi_count > 0 else " / 주변 상권 정보 없음)"
+            folium.Marker(
+                location=list(final_coord), popup=popup,
+                icon=folium.Icon(color='red', icon='star')
+            ).add_to(m)
 
-    st.markdown("---")
-    
-    if st.session_state.notify_data and st.session_state.notify_data.get("ready"):
-        n_res = st.session_state.notify_data
-        
-        st.markdown("#### 📋 발송 내용 확인")
-        st.code(n_res['msg'], language="text")
-        
-        encoded_msg = urllib.parse.quote(n_res['msg'])
-        phone_num = n_res['phone']
-        
-        sms_url = f"sms:{phone_num}?body={encoded_msg}"
-        st.markdown(f"### [💬 여기를 터치하여 문자 앱으로 전송하기]({sms_url})")
+        legend_html = """
+        <div style="position: fixed; bottom: 30px; left: 30px; z-index:9999;
+                    background-color: white; padding: 10px; border-radius: 6px;
+                    border: 1px solid #ccc; font-size: 13px;">
+        <b>범례</b><br>
+        ⚫ 참석자 위치 &nbsp;|&nbsp; 🔵 이동 가능 반경 &nbsp;|&nbsp; 🔴 최대 교집합 영역 &nbsp;|&nbsp; ⭐ 추천 장소
+        </div>
+        """
+        m.get_root().html.add_child(folium.Element(legend_html))
+        m.fit_bounds([[lat_min, lon_min], [lat_max, lon_max]])
+
+        print("✅ 연산 완료. 아래 지도를 확인하세요.")
+        display(m)
+
+
+calc_btn.on_click(calculate_optimal_location)
+
+# ===========================================================
+# 8. 화면 출력
+# ===========================================================
+ui_container = widgets.VBox([
+    title,
+    inputs_box,
+    widgets.HBox([add_btn, radius_slider]),
+    calc_btn,
+])
+
+display(ui_container)
+display(map_output_area)
+1 1
