@@ -1,26 +1,17 @@
 """
 =========================================================
-행복한 퇴근 이후 - 통합 앱 (Streamlit / GitHub 배포 최적화 버전)
+행복한 퇴근 이후 - 통합 앱 (Streamlit / GitHub 배포 버전)
   탭1) 퇴근시간 최적화 AI
   탭2) 회식장소 최적위치 산출기
   탭3) 출발 알리미 (문자 앱 열기 링크)
 
-[원본 대비 주요 개선]
-1. 보안: 하드코딩된 카카오 키를 st.secrets로 분리 (GitHub 노출 방지)
-2. 무한 로딩 해결:
-   - 외부 API 타임아웃을 3초 -> 8초로 상향 + OSRM 미러/재시도
-   - st.tabs 사용으로 탭 전환 시 불필요한 전체 재연산 방지
-   - st_folium 결과값 추적 차단(returned_objects=[])으로 리렌더 루프 차단
-3. 로직 버그 수정: 회식 후보 3x3 격자 간격 계산 정상화
-4. 예외 처리: bare except 제거, 사용자에게 원인 메시지 표시
-5. 패키지 의존성 정리 (requirements.txt 동봉)
+[주의] 카카오 키가 코드에 직접 포함되어 있습니다.
+       Secrets 설정 없이 바로 실행되지만, 공개 저장소에 올리면
+       키가 노출되므로 추후 카카오 디벨로퍼스에서 재발급을 권장합니다.
 
 [배포 방법]
 1) requirements.txt 를 저장소에 추가
-2) .streamlit/secrets.toml 에 카카오 키 저장 (아래 형식)
-       KAKAO_REST_KEY = "발급받은_본인_키"
-   * Streamlit Cloud 는 Settings > Secrets 메뉴에 같은 내용 입력
-3) app.py 를 메인 파일로 지정하여 배포
+2) app.py 를 메인 파일로 지정하여 배포 (Secrets 설정 불필요)
 =========================================================
 """
 
@@ -45,7 +36,7 @@ except Exception:
 
 
 # =========================================================
-# 0. 페이지 설정 / 상태 초기화 / 키 로딩
+# 0. 페이지 설정 / 상태 초기화 / 키
 # =========================================================
 st.set_page_config(page_title="행복한 퇴근 이후", page_icon="🌆", layout="centered")
 
@@ -64,22 +55,8 @@ for k, v in _DEFAULT_STATE.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-
-def get_kakao_key():
-    """카카오 REST 키를 secrets 에서 로딩. 없으면 안내 후 중단."""
-    try:
-        return st.secrets["KAKAO_REST_KEY"]
-    except Exception:
-        st.error(
-            "카카오 REST 키가 설정되지 않았습니다.\n\n"
-            "`.streamlit/secrets.toml` 파일(또는 Streamlit Cloud의 Secrets)에 "
-            "아래 한 줄을 추가해 주세요:\n\n"
-            '`KAKAO_REST_KEY = \"발급받은_본인_키\"`'
-        )
-        st.stop()
-
-
-KAKAO_KEY = get_kakao_key()
+# 카카오 REST 키 (코드 내장)
+KAKAO_KEY = "df68bf65618592b6d685caec6521432f"
 _TIMEOUT = 8  # 외부 API 공통 타임아웃 (원본 3초 -> 8초)
 
 _OSRM_MIRRORS = [
@@ -362,7 +339,7 @@ with tab2:
                     avg_lat = sum(l["lat"] for l in locs) / len(locs)
                     avg_lon = sum(l["lon"] for l in locs) / len(locs)
 
-                    # 후보 3x3 격자 (버그 수정: 간격이 -off, 0, +off 로 균등 분포되도록)
+                    # 후보 3x3 격자 (간격이 -off, 0, +off 로 균등 분포)
                     candidates = []
                     lat_off = 3 / 111.0
                     lon_off = 3 / (111.0 * math.cos(math.radians(avg_lat)))
