@@ -218,6 +218,28 @@ def build_realtime_matrix(sources, candidates):
     return matrix
 
 
+def get_route_path(o_lat, o_lon, d_lat, d_lon):
+    """실제 도로 이동 경로 좌표 (카카오내비 우선, 실패 시 OSRM, 최후 직선 2점)"""
+    _, _, path = get_kakao_navi_baseline(o_lat, o_lon, d_lat, d_lon)
+    if path:
+        return path
+    return get_real_road_path([[o_lat, o_lon], [d_lat, d_lon]])
+
+
+def fetch_all_category_restaurants(lat, lon, radius_m):
+    """모든 음식 종류의 TOP 5를 병렬로 미리 수집 (검색 후 즉시 전환용)"""
+    results = {}
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {ex.submit(get_kakao_restaurants, lat, lon, radius_m, q, c): label
+                   for label, (q, c) in CATEGORY_OPTIONS.items()}
+        for fut, label in futures.items():
+            try:
+                results[label] = fut.result()
+            except Exception:
+                results[label] = []
+    return results
+
+
 def now_kst():
     return datetime.utcnow() + timedelta(hours=9)
 
@@ -349,7 +371,7 @@ with tab1:
 # ---------------------------------------------------------
 with tab2:
     st.subheader("회식장소 추천기")
-    st.caption("참석자 주소를 입력하면 실시간 교통 기준 소요시간으로 중심 위치를 찾고, 선택한 종류의 식당을 추천합니다.")
+    st.caption("참석자 주소를 입력하면 실시간 교통 기준 소요시간으로 중심 위치를 찾고, 음식 종류별 TOP 5를 한 번에 수집해 검색 후 자유롭게 전환할 수 있습니다.")
 
     bc1, bc2, bc3 = st.columns([1, 1, 2])
     if bc1.button("➕ 인원 추가", key="m2_add"):
@@ -358,12 +380,11 @@ with tab2:
         st.session_state.num_people -= 1
     search_radius = bc3.slider("탐색 반경(m)", 100, 2000, 500, 100, key="m2_radius")
 
-    fc1, fc2 = st.columns(2)
-    sel_category = fc1.selectbox("🍽️ 음식 종류", list(CATEGORY_OPTIONS.keys()), key="m2_category")
-    criterion = fc2.radio(
+    criterion = st.radio(
         "📐 중심 산출 기준",
         ["공평 우선 (가장 오래 걸리는 사람의 시간 최소화)", "효율 우선 (전체 소요시간 합 최소화)"],
         key="m2_criterion",
+        horizontal=True,
     )
 
     addresses = []
@@ -440,13 +461,20 @@ with tab2:
                         st.error("경로 소요시간 계산에 실패했습니다. 잠시 후 다시 시도해 주세요.")
                     else:
                         b_lat, b_lon = candidates[best_idx]
-                        q_word, cat_code = CATEGORY_OPTIONS[sel_category]
-                        rests = get_kakao_restaurants(b_lat, b_lon, search_radius, q_word, cat_code)
+
+                        # 모든 음식 종류의 TOP 5를 병렬 수집 (검색 후 종류 전환 시 재호출 불필요)
+                        rests_by_cat = fetch_all_category_restaurants(b_lat, b_lon, search_radius)
+
+                        # 지도 표시용: 각 참석자의 실제 도로 이동 경로 수집
+                        route_paths = [get_route_path(s_lat, s_lon, b_lat, b_lon)
+                                       for (s_lat, s_lon) in sources]
 
                         st.session_state.dinner_data = {
                             "locs": locs, "b_lat": b_lat, "b_lon": b_lon,
-                            "best_times": best_times, "rests": rests, "radius": search_radius,
-                            "realtime": realtime, "cat_label": sel_category,
+                            "paths": route_paths,
+                            "best_times": best_times, "rests_by_cat": rests_by_cat,
+                            "radius": search_radius,
+                            "realtime": realtime,
                             "criterion": "공평 우선" if fair_mode else "효율 우선",
                             "calc_time": now_kst().strftime("%H:%M"),
                         }
@@ -462,25 +490,65 @@ with tab2:
                 cols[idx].metric(loc["name"], f"{int(round(d['best_times'][idx]))}분")
             traffic_label = "카카오내비 실시간 교통 반영" if d.get("realtime") else "표준 경로 기준 (실시간 미반영)"
             st.caption(f"{d.get('calc_time', '')} 기준, {traffic_label}, {d.get('criterion', '')} 산출")
+
+        view_cat = st.selectbox("🍽️ 음식 종류 선택 (검색 후 자유롭게 전환)",
+                                list(CATEGORY_OPTIONS.keys()), key="m2_view_category")
+        sel_rests = d.get("rests_by_cat", {}).get(view_cat, [])
+
         try:
             m = folium.Map(location=[d["b_lat"], d["b_lon"]], zoom_start=14, tiles="CartoDB positron")
-            for l in d["locs"]:
+            route_colors = ["#e74c3c", "#2980b9", "#27ae60", "#8e44ad", "#f39c12", "#16a085", "#d35400", "#2c3e50"]
+            paths = d.get("paths", [])
+            times = d.get("best_times", [])
+            for idx, l in enumerate(d["locs"]):
+                color = route_colors[idx % len(route_colors)]
+                mins = int(round(times[idx])) if idx < len(times) else None
+                label_txt = f"{l['name']} {mins}분" if mins is not None else l["name"]
+
                 folium.Marker([l["lat"], l["lon"]], popup=l["name"], icon=folium.Icon(color="blue")).add_to(m)
-                folium.PolyLine([[l["lat"], l["lon"]], [d["b_lat"], d["b_lon"]]],
-                                color="gray", weight=2, dash_array="5, 5").add_to(m)
+                route = paths[idx] if idx < len(paths) and paths[idx] else None
+                if route and len(route) > 2:
+                    # 실제 도로 이동 경로 (참석자별 색상 구분)
+                    folium.PolyLine(route, color=color, weight=4, opacity=0.8,
+                                    tooltip=label_txt).add_to(m)
+                    mid = route[len(route) // 2]
+                else:
+                    # 경로 수집 실패 시에만 점선 직선으로 대체 표시
+                    folium.PolyLine([[l["lat"], l["lon"]], [d["b_lat"], d["b_lon"]]],
+                                    color="gray", weight=2, dash_array="5, 5",
+                                    tooltip=f"{label_txt} (경로 미확보, 직선 표시)").add_to(m)
+                    mid = [(l["lat"] + d["b_lat"]) / 2, (l["lon"] + d["b_lon"]) / 2]
+
+                # 경로 중간 지점에 소요시간 라벨 표시
+                folium.Marker(
+                    mid,
+                    icon=folium.DivIcon(
+                        icon_size=(0, 0),
+                        html=(f'<div style="background:{color};color:#fff;padding:2px 8px;'
+                              f'border-radius:10px;font-size:11px;font-weight:bold;'
+                              f'white-space:nowrap;display:inline-block;'
+                              f'box-shadow:0 1px 3px rgba(0,0,0,0.4);">{label_txt}</div>')
+                    ),
+                ).add_to(m)
             folium.Circle(location=[d["b_lat"], d["b_lon"]], radius=int(d["radius"]),
                           color="#0052cc", fill=True, fill_color="#0052cc", fill_opacity=0.3, weight=2).add_to(m)
             folium.Marker([d["b_lat"], d["b_lon"]], popup="최적 중심점",
                           icon=folium.Icon(color="red", icon="star")).add_to(m)
-            for r in d["rests"]:
+            for r in sel_rests:
                 folium.Marker([float(r["y"]), float(r["x"])], popup=r["place_name"],
                               icon=folium.Icon(color="green", icon="cutlery")).add_to(m)
+
+            # 모든 참석자와 회식 위치가 한 화면에 들어오도록 자동 조정
+            all_lats = [l["lat"] for l in d["locs"]] + [d["b_lat"]]
+            all_lons = [l["lon"] for l in d["locs"]] + [d["b_lon"]]
+            m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]])
+
             st_folium(m, use_container_width=True, height=350, key="map_dinner", returned_objects=[])
 
-            st.markdown(f"#### 🍽️ 반경 {d['radius']}m 내 {d.get('cat_label', '맛집')} TOP 5")
-            if d["rests"]:
+            st.markdown(f"#### 🍽️ 반경 {d['radius']}m 내 {view_cat} TOP 5")
+            if sel_rests:
                 rest_list = []
-                for idx, r in enumerate(d["rests"]):
+                for idx, r in enumerate(sel_rests):
                     addr = r.get("road_address_name", "").strip() or r.get("address_name", "주소 누락")
                     rest_list.append({"순위": f"{idx + 1}위", "이름": r["place_name"],
                                       "종류": r.get("category_name", "").split(">")[-1].strip(),
@@ -489,7 +557,7 @@ with tab2:
                              column_config={"링크": st.column_config.LinkColumn("🔗 지도")},
                              hide_index=True, use_container_width=True)
             else:
-                st.info(f"반경 {d['radius']}m 내에 검색된 맛집이 없습니다. 반경을 넓혀보세요.")
+                st.info(f"반경 {d['radius']}m 내에 검색된 {view_cat} 매장이 없습니다. 반경을 넓히거나 다른 종류를 선택해 보세요.")
         except Exception:
             st.caption("결과 화면을 준비하는 중입니다.")
 
