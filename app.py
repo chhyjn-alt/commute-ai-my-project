@@ -19,6 +19,7 @@ import math
 import random
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import requests
@@ -157,17 +158,64 @@ def get_real_road_path(waypoints):
     return waypoints
 
 
-def get_kakao_restaurants(lat, lon, radius_m):
-    """카카오 키워드 검색으로 주변 맛집 상위 5곳"""
+# 음식 종류별 검색 설정 (표시명: (검색어, 카카오 카테고리 코드))
+CATEGORY_OPTIONS = {
+    "전체 (맛집)": ("맛집", "FD6"),
+    "한식": ("한식", "FD6"),
+    "중식": ("중식", "FD6"),
+    "일식": ("일식", "FD6"),
+    "양식": ("양식", "FD6"),
+    "고기/구이": ("고기구이", "FD6"),
+    "치킨": ("치킨", "FD6"),
+    "회/해산물": ("횟집", "FD6"),
+    "술집/호프": ("술집", "FD6"),
+    "카페/디저트": ("카페", "CE7"),
+}
+
+
+def get_kakao_restaurants(lat, lon, radius_m, query="맛집", cat_code="FD6"):
+    """카카오 키워드 검색으로 주변 식당 상위 5곳 (음식 종류 필터 적용)"""
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_KEY}"}
-    params = {"query": "맛집", "category_group_code": "FD6",
+    params = {"query": query, "category_group_code": cat_code,
               "x": str(lon), "y": str(lat), "radius": int(radius_m), "sort": "accuracy"}
     try:
         res = requests.get(url, headers=headers, params=params, timeout=_TIMEOUT).json()
         return res.get("documents", [])[:5]
     except Exception:
         return []
+
+
+def get_kakao_duration_min(o_lat, o_lon, d_lat, d_lon):
+    """카카오내비 실시간 교통 기준 소요시간(분). 실패 시 None."""
+    url = "https://apis-navi.kakaomobility.com/v1/directions"
+    headers = {"Authorization": f"KakaoAK {KAKAO_KEY}"}
+    params = {"origin": f"{o_lon},{o_lat}", "destination": f"{d_lon},{d_lat}", "priority": "TIME"}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=_TIMEOUT).json()
+        routes = res.get("routes", [])
+        if routes and routes[0].get("result_code") == 0:
+            return routes[0]["summary"]["duration"] / 60.0
+    except Exception:
+        pass
+    return None
+
+
+def build_realtime_matrix(sources, candidates):
+    """참석자(sources) x 후보지(candidates) 실시간 소요시간 행렬(분)을 병렬 계산"""
+    matrix = [[None] * len(candidates) for _ in sources]
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {}
+        for s_idx, (s_lat, s_lon) in enumerate(sources):
+            for d_idx, (d_lat, d_lon) in enumerate(candidates):
+                fut = ex.submit(get_kakao_duration_min, s_lat, s_lon, d_lat, d_lon)
+                futures[fut] = (s_idx, d_idx)
+        for fut, (s_idx, d_idx) in futures.items():
+            try:
+                matrix[s_idx][d_idx] = fut.result()
+            except Exception:
+                matrix[s_idx][d_idx] = None
+    return matrix
 
 
 def now_kst():
@@ -301,7 +349,7 @@ with tab1:
 # ---------------------------------------------------------
 with tab2:
     st.subheader("회식장소 추천기")
-    st.caption("참석자 주소를 모두 입력하면, 모두의 이동시간이 가장 균형 잡힌 중심점과 주변 맛집을 추천합니다.")
+    st.caption("참석자 주소를 입력하면 실시간 교통 기준 소요시간으로 중심 위치를 찾고, 선택한 종류의 식당을 추천합니다.")
 
     bc1, bc2, bc3 = st.columns([1, 1, 2])
     if bc1.button("➕ 인원 추가", key="m2_add"):
@@ -309,6 +357,14 @@ with tab2:
     if bc2.button("➖ 인원 감소", key="m2_sub") and st.session_state.num_people > 2:
         st.session_state.num_people -= 1
     search_radius = bc3.slider("탐색 반경(m)", 100, 2000, 500, 100, key="m2_radius")
+
+    fc1, fc2 = st.columns(2)
+    sel_category = fc1.selectbox("🍽️ 음식 종류", list(CATEGORY_OPTIONS.keys()), key="m2_category")
+    criterion = fc2.radio(
+        "📐 중심 산출 기준",
+        ["공평 우선 (가장 오래 걸리는 사람의 시간 최소화)", "효율 우선 (전체 소요시간 합 최소화)"],
+        key="m2_criterion",
+    )
 
     addresses = []
     for i in range(st.session_state.num_people):
@@ -348,30 +404,52 @@ with tab2:
                             candidates.append((avg_lat + lat_off * i, avg_lon + lon_off * j))
 
                     sources = [(l["lat"], l["lon"]) for l in locs]
-                    coords = sources + candidates
-                    coord_str = ";".join([f"{lon},{lat}" for lat, lon in coords])
-                    src_str = ";".join(map(str, range(len(sources))))
-                    dst_str = ";".join(map(str, range(len(sources), len(coords))))
+                    fair_mode = criterion.startswith("공평")
 
-                    data = osrm_request(f"/table/v1/driving/{coord_str}?sources={src_str}&destinations={dst_str}")
-                    durations = data.get("durations", [])
-
-                    best_idx, min_max, best_times = 0, float("inf"), []
-                    if durations:
+                    def pick_best(mat):
+                        """소요시간 행렬(분)에서 산출 기준에 맞는 최적 후보 선택"""
+                        b_idx, b_score, b_times = None, float("inf"), []
                         for d_idx in range(len(candidates)):
-                            times = [durations[s][d_idx] for s in range(len(sources))]
-                            if None in times:
+                            ts = [mat[s][d_idx] for s in range(len(sources))]
+                            if any(t is None for t in ts):
                                 continue
-                            if max(times) < min_max:
-                                min_max, best_idx, best_times = max(times), d_idx, times
+                            score = max(ts) if fair_mode else sum(ts)
+                            if score < b_score:
+                                b_idx, b_score, b_times = d_idx, score, ts
+                        return b_idx, b_times
 
-                    b_lat, b_lon = candidates[best_idx]
-                    rests = get_kakao_restaurants(b_lat, b_lon, search_radius)
+                    # 1차: 카카오내비 실시간 교통 기준 소요시간 행렬 (병렬 호출)
+                    matrix = build_realtime_matrix(sources, candidates)
+                    best_idx, best_times = pick_best(matrix)
+                    realtime = best_idx is not None
 
-                    st.session_state.dinner_data = {
-                        "locs": locs, "b_lat": b_lat, "b_lon": b_lon,
-                        "best_times": best_times, "rests": rests, "radius": search_radius
-                    }
+                    # 2차: 카카오 실패 시 OSRM 표준 경로로 대체 (실시간 미반영)
+                    if best_idx is None:
+                        coords = sources + candidates
+                        coord_str = ";".join([f"{lon},{lat}" for lat, lon in coords])
+                        src_str = ";".join(map(str, range(len(sources))))
+                        dst_str = ";".join(map(str, range(len(sources), len(coords))))
+                        data = osrm_request(f"/table/v1/driving/{coord_str}?sources={src_str}&destinations={dst_str}")
+                        durations = data.get("durations", [])
+                        if durations:
+                            osrm_mat = [[(durations[s][d] / 60.0 if durations[s][d] is not None else None)
+                                         for d in range(len(candidates))] for s in range(len(sources))]
+                            best_idx, best_times = pick_best(osrm_mat)
+
+                    if best_idx is None:
+                        st.error("경로 소요시간 계산에 실패했습니다. 잠시 후 다시 시도해 주세요.")
+                    else:
+                        b_lat, b_lon = candidates[best_idx]
+                        q_word, cat_code = CATEGORY_OPTIONS[sel_category]
+                        rests = get_kakao_restaurants(b_lat, b_lon, search_radius, q_word, cat_code)
+
+                        st.session_state.dinner_data = {
+                            "locs": locs, "b_lat": b_lat, "b_lon": b_lon,
+                            "best_times": best_times, "rests": rests, "radius": search_radius,
+                            "realtime": realtime, "cat_label": sel_category,
+                            "criterion": "공평 우선" if fair_mode else "효율 우선",
+                            "calc_time": now_kst().strftime("%H:%M"),
+                        }
                 except Exception as e:
                     st.error(f"연산 중 오류가 발생했습니다: {type(e).__name__}")
 
@@ -381,7 +459,9 @@ with tab2:
         if d.get("best_times"):
             cols = st.columns(len(d["locs"]))
             for idx, loc in enumerate(d["locs"]):
-                cols[idx].metric(loc["name"], f"{int(d['best_times'][idx] // 60)}분")
+                cols[idx].metric(loc["name"], f"{int(round(d['best_times'][idx]))}분")
+            traffic_label = "카카오내비 실시간 교통 반영" if d.get("realtime") else "표준 경로 기준 (실시간 미반영)"
+            st.caption(f"{d.get('calc_time', '')} 기준, {traffic_label}, {d.get('criterion', '')} 산출")
         try:
             m = folium.Map(location=[d["b_lat"], d["b_lon"]], zoom_start=14, tiles="CartoDB positron")
             for l in d["locs"]:
@@ -397,7 +477,7 @@ with tab2:
                               icon=folium.Icon(color="green", icon="cutlery")).add_to(m)
             st_folium(m, use_container_width=True, height=350, key="map_dinner", returned_objects=[])
 
-            st.markdown(f"#### 🍽️ 반경 {d['radius']}m 내 맛집")
+            st.markdown(f"#### 🍽️ 반경 {d['radius']}m 내 {d.get('cat_label', '맛집')} TOP 5")
             if d["rests"]:
                 rest_list = []
                 for idx, r in enumerate(d["rests"]):
@@ -419,7 +499,7 @@ with tab2:
 # ---------------------------------------------------------
 with tab3:
     st.subheader("출발 알리미")
-    st.caption("도착 예정 시간을 계산해 문자 메시지를 만들고, 휴대폰 문자 앱을 바로 여는 링크를 생성합니다.")
+    st.caption("도착 예정 시간을 계산해 문자 메시지를 만들어 줍니다. 복사 버튼으로 내용을 복사해 문자 앱에 붙여넣어 보내세요.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -472,8 +552,30 @@ with tab3:
 
     if st.session_state.notify_data and st.session_state.notify_data.get("ready"):
         n = st.session_state.notify_data
-        st.markdown("#### 📋 발송 내용 미리보기")
+        st.markdown("#### 📋 발송 내용")
+
+        # 1) 메시지 복사 버튼 (갤럭시 보안과 무관하게 가장 확실한 방법)
+        #    st.code 우측 상단의 복사 아이콘으로 전체 메시지를 한 번에 복사
         st.code(n["msg"], language="text")
+        st.caption("⬆️ 위 박스 오른쪽 위 복사 아이콘을 누르면 메시지 전체가 복사됩니다.")
+
+        # 받는 번호도 따로 복사할 수 있게 표시
+        if n["phone"]:
+            st.markdown("**받는 번호** (탭하여 복사)")
+            st.code(n["phone"], language="text")
+
+        st.markdown("---")
+        st.markdown(
+            "##### 📱 보내는 방법\n"
+            "1. 위 **메시지 박스의 복사 아이콘**을 눌러 내용을 복사합니다.\n"
+            "2. 휴대폰 **문자 앱**을 열고 받는 사람을 지정합니다.\n"
+            "3. 입력창을 길게 눌러 **붙여넣기** 후 전송합니다."
+        )
+
+        # 2) 보조 수단: 문자 앱 열기 링크 (되는 기기에서는 바로 열림)
         sms_url = f"sms:{n['phone']}?body={urllib.parse.quote(n['msg'])}"
-        st.link_button("💬 문자 앱으로 열기", sms_url, type="primary", use_container_width=True)
-        st.caption("버튼을 누르면 휴대폰 기본 문자 앱이 열리며, 내용이 자동 입력됩니다. (전송 버튼은 직접 눌러야 발송됩니다)")
+        st.link_button("💬 문자 앱 바로 열기 (지원되는 기기만)", sms_url, use_container_width=True)
+        st.caption(
+            "※ 갤럭시 등 일부 휴대폰은 보안 정책상 웹에서 문자 앱이 자동으로 열리지 않습니다. "
+            "이 경우 위의 복사 → 붙여넣기 방법을 이용해 주세요."
+        )
