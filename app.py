@@ -1,38 +1,39 @@
 """
 =========================================================
-행복한 퇴근 이후 - 통합 앱 v4 (Streamlit / GitHub 배포 버전)
+행복한 퇴근 이후 - 통합 앱 v5 (Streamlit / GitHub 배포 버전)
   탭1) 퇴근시간 최적화 AI
   탭2) 회식장소 최적위치 산출기
   탭3) 출발 알리미
 
-[v4 개선 사항]
-그룹1 빠른 개선
-  - 탭1 시간대별 소요시간 라인 차트
-  - 날씨를 출발지/중심지 좌표 기준으로 동적 조회
-  - 참석자 이름 입력 및 지도 라벨 반영
-  - 연산 진행 단계 실시간 표시
-  - 각 탭 결과 초기화 버튼
-그룹2 정확도 개선
-  - 경로B를 카카오내비 실제 대안경로로 교체 (미제공 시 추정 표기)
-  - 비/눈 날씨 보정 계수 적용
-  - 회식 중심 2단계 탐색 (광역 후 정밀 재탐색)
-  - 참석자 분포에 따른 후보 간격 자동 조절
-  - 회식 예정 시각 혼잡도 보정 (추정 계수, 표시용)
-그룹3 편의 기능
-  - 탭1 최적 출발시간을 탭3 문자에 자동 연동
-  - 탭2 결과 공유 문구 자동 생성
-  - 탭3 메시지 발송 전 직접 편집
-  - 주소 즐겨찾기 (파일 저장, 클라우드 재시작 시 초기화될 수 있음)
-  - 이동 수단 선택 (자동차 / 대중교통 간이 추정)
-그룹4 보안/유지보수
-  - 카카오 키를 Secrets 우선 조회, 없으면 내장 키 사용
-  - 오류 발생 이력을 사이드바에서 확인 가능
-  * 파일 분리는 배포 편의를 위해 보류 (단일 파일 유지)
+[v5 개선 사항]  * v4 기능은 모두 유지
+1) 회식 결과 문서 공유 (PDF / HTML)
+  - 검색 결과를 PDF 파일로 저장해 카카오톡·메일 등으로 첨부 공유
+  - PDF에 산출 조건, 추천 중심 도로명 주소, 참석자별 소요시간,
+    선택한 음식 종류 TOP5, 카카오맵 위치 링크 포함
+  - 한글 폰트 자동 탐색 (나눔고딕/맑은 고딕). 폰트가 없으면
+    안내 문구를 표시하고, HTML 저장은 항상 가능
+  - 중심 좌표 → 도로명 주소 자동 변환 (카카오 좌표→주소 API)
+2) 장거리 모임 대응 (거점 도시 기반 2단계 선정)
+  - 참석자 최대 직선 이격 60km 이상이면 자동으로 장거리 모드 전환
+    (자동 / 일반 고정 / 장거리 고정 선택 가능)
+  - 1단계: 전국 주요 KTX/SRT역(교통 거점) 후보를 직선거리로 압축한 뒤
+    카카오내비 실시간 소요시간으로 최적 거점 도시 선정
+  - 2단계: 거점역 주변 음식점 밀집도(상권)를 분석해 중심을 미세 조정
+  - 장거리는 KTX/SRT 이용 권장 안내, 표시 시간은 자동차 실시간 기준
+    (대중교통 간이 추정·회식시각 혼잡도 보정은 장거리에 미적용)
+  - 같은 도시·인접 도시 모임은 기존 격자 탐색 로직을 그대로 사용
+
+[배포 참고]
+  - requirements.txt에 fpdf2 추가
+  - Streamlit Cloud에서 한글 PDF를 쓰려면 저장소 루트에 packages.txt를
+    만들고 fonts-nanum 한 줄 추가 (또는 NanumGothic.ttf 파일을 저장소에 포함)
 =========================================================
 """
 
+import html
 import json
 import math
+import os
 import random
 import time
 import urllib.parse
@@ -50,6 +51,13 @@ try:
     _HAS_POLYLINE = True
 except Exception:
     _HAS_POLYLINE = False
+
+try:
+    from fpdf import FPDF
+    _HAS_FPDF = True
+except Exception:
+    FPDF = None
+    _HAS_FPDF = False
 
 
 # =========================================================
@@ -142,6 +150,27 @@ def search_kakao_address(query):
         log_error("주소 검색", e)
         st.warning(f"주소 검색 통신에 실패했습니다: {query}")
         return []
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def coord_to_address(lat, lon):
+    """좌표 → 도로명(없으면 지번) 주소 변환. 실패 시 None."""
+    url = "https://dapi.kakao.com/v2/local/geo/coord2address.json"
+    headers = {"Authorization": f"KakaoAK {KAKAO_KEY}"}
+    params = {"x": f"{lon:.6f}", "y": f"{lat:.6f}"}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=_TIMEOUT).json()
+        docs = res.get("documents", [])
+        if docs:
+            road = docs[0].get("road_address")
+            if road and road.get("address_name"):
+                return road["address_name"]
+            jibun = docs[0].get("address")
+            if jibun and jibun.get("address_name"):
+                return jibun["address_name"]
+    except Exception:
+        pass
+    return None
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -337,6 +366,19 @@ def get_kakao_restaurants(lat, lon, radius_m, query="맛집", cat_code="FD6", so
         return []
 
 
+def get_kakao_place_count(lat, lon, radius_m, query="맛집", cat_code="FD6"):
+    """반경 내 음식점 총 매장 수 (상권 밀집도 지표, 스레드 안전)"""
+    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
+    headers = {"Authorization": f"KakaoAK {KAKAO_KEY}"}
+    params = {"query": query, "category_group_code": cat_code,
+              "x": str(lon), "y": str(lat), "radius": int(radius_m), "size": 1}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=_TIMEOUT).json()
+        return int(res.get("meta", {}).get("total_count", 0))
+    except Exception:
+        return 0
+
+
 def fetch_all_category_restaurants(lat, lon, radius_m):
     """모든 음식 종류의 TOP 5를 병렬 수집.
     기본 반경 내에 없으면 광역(최대 10km)에서 거리순으로 재탐색하고,
@@ -366,6 +408,296 @@ def fetch_all_category_restaurants(lat, lon, radius_m):
             except Exception:
                 pass
     return results, adjusted
+
+
+# =========================================================
+# 2.5 장거리 모임: 전국 교통 거점(KTX/SRT역) 기반 선정
+# =========================================================
+_LONG_DIST_KM = 60  # 참석자 최대 직선 이격이 이 값 이상이면 장거리 모드 자동 전환
+
+# 전국 주요 교통 거점 (KTX/SRT 정차역 중심, 좌표는 역사 기준 근사값)
+MAJOR_HUBS = [
+    {"city": "서울", "name": "서울역", "lat": 37.5547, "lon": 126.9706},
+    {"city": "서울", "name": "용산역", "lat": 37.5298, "lon": 126.9648},
+    {"city": "서울", "name": "수서역(SRT)", "lat": 37.4871, "lon": 127.1013},
+    {"city": "서울", "name": "청량리역", "lat": 37.5801, "lon": 127.0459},
+    {"city": "광명", "name": "광명역", "lat": 37.4162, "lon": 126.8848},
+    {"city": "수원", "name": "수원역", "lat": 37.2659, "lon": 127.0010},
+    {"city": "평택", "name": "평택지제역", "lat": 37.0187, "lon": 127.0703},
+    {"city": "천안아산", "name": "천안아산역", "lat": 36.7943, "lon": 127.1045},
+    {"city": "청주", "name": "오송역", "lat": 36.6203, "lon": 127.3269},
+    {"city": "대전", "name": "대전역", "lat": 36.3316, "lon": 127.4344},
+    {"city": "김천구미", "name": "김천구미역", "lat": 36.1135, "lon": 128.0533},
+    {"city": "대구", "name": "동대구역", "lat": 35.8797, "lon": 128.6286},
+    {"city": "경주", "name": "경주역(KTX)", "lat": 35.7981, "lon": 129.1391},
+    {"city": "울산", "name": "울산역", "lat": 35.5514, "lon": 129.1386},
+    {"city": "부산", "name": "부산역", "lat": 35.1151, "lon": 129.0405},
+    {"city": "창원", "name": "창원중앙역", "lat": 35.2323, "lon": 128.6721},
+    {"city": "광주", "name": "광주송정역", "lat": 35.1372, "lon": 126.7934},
+    {"city": "전주", "name": "전주역", "lat": 35.8404, "lon": 127.1614},
+    {"city": "익산", "name": "익산역", "lat": 35.9394, "lon": 126.9460},
+    {"city": "강릉", "name": "강릉역", "lat": 37.7638, "lon": 128.8996},
+    {"city": "포항", "name": "포항역", "lat": 36.0710, "lon": 129.3415},
+    {"city": "목포", "name": "목포역", "lat": 34.7936, "lon": 126.3888},
+    {"city": "여수", "name": "여수엑스포역", "lat": 34.7527, "lon": 127.7469},
+]
+
+
+def thin_path(path, max_pts=1200):
+    """장거리 경로 좌표를 지도 표시용으로 간격 축소 (형상 유지)"""
+    if not path or len(path) <= max_pts:
+        return path
+    step = len(path) / float(max_pts)
+    out = [path[int(i * step)] for i in range(max_pts)]
+    out.append(path[-1])
+    return out
+
+
+def select_best_hub(sources, fair_mode, top_n=4):
+    """장거리 1단계: 거점 도시(역) 선정.
+    직선거리로 후보 top_n 압축 → 카카오내비 실시간 소요시간으로 최종 선정.
+    실시간 실패 시 OSRM 표준 경로, 그마저 실패하면 직선거리 1순위.
+    반환: (hub dict, 참석자별 시간 리스트 또는 None, 실시간 성공 여부)"""
+    scored = []
+    for hub in MAJOR_HUBS:
+        ds = [approx_km(s[0], s[1], hub["lat"], hub["lon"]) for s in sources]
+        score = max(ds) if fair_mode else sum(ds)
+        scored.append((score, hub))
+    scored.sort(key=lambda x: x[0])
+    cand_hubs = [h for _, h in scored[:top_n]]
+    cand_pts = [(h["lat"], h["lon"]) for h in cand_hubs]
+
+    def pick(mat):
+        b_idx, b_score, b_times = None, float("inf"), []
+        for d_idx in range(len(cand_pts)):
+            ts = [mat[s][d_idx] for s in range(len(sources))]
+            if any(t is None for t in ts):
+                continue
+            sc = max(ts) if fair_mode else sum(ts)
+            if sc < b_score:
+                b_idx, b_score, b_times = d_idx, sc, ts
+        return b_idx, b_times
+
+    mat = build_realtime_matrix(sources, cand_pts)
+    idx, times = pick(mat)
+    if idx is not None:
+        return cand_hubs[idx], times, True
+
+    # 실시간 실패 → OSRM 표준 경로 대체
+    coords = sources + cand_pts
+    coord_str = ";".join([f"{lon},{lat}" for lat, lon in coords])
+    src_str = ";".join(map(str, range(len(sources))))
+    dst_str = ";".join(map(str, range(len(sources), len(coords))))
+    data = osrm_request(f"/table/v1/driving/{coord_str}?sources={src_str}&destinations={dst_str}")
+    durations = data.get("durations", [])
+    if durations:
+        osrm_mat = [[(durations[s][d] / 60.0 if durations[s][d] is not None else None)
+                     for d in range(len(cand_pts))] for s in range(len(sources))]
+        idx, times = pick(osrm_mat)
+        if idx is not None:
+            return cand_hubs[idx], times, False
+
+    # 전부 실패 → 직선거리 1순위 거점, 시간 미상
+    return cand_hubs[0], None, False
+
+
+def refine_center_by_density(hub_lat, hub_lon, count_radius_m=500, step_km=0.4):
+    """장거리 2단계: 거점역 주변 3x3 지점의 음식점 수(상권 밀집도)를 비교해
+    가장 밀집한 지점으로 중심을 미세 조정. (동률이면 역 위치 유지)
+    반환: (중심 lat, 중심 lon, 선정 지점 매장 수, 역 기준 매장 수)"""
+    lat_off = step_km / 111.0
+    lon_off = step_km / (111.0 * math.cos(math.radians(hub_lat)))
+    cands = [(hub_lat + lat_off * i, hub_lon + lon_off * j)
+             for i in (-1, 0, 1) for j in (-1, 0, 1)]
+    counts = [0] * len(cands)
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futs = {ex.submit(get_kakao_place_count, la, lo, count_radius_m): idx
+                for idx, (la, lo) in enumerate(cands)}
+        for fut, idx in futs.items():
+            try:
+                counts[idx] = fut.result()
+            except Exception:
+                counts[idx] = 0
+    hub_idx = 4  # (0, 0) 위치 = 역 자체
+    best_idx = hub_idx
+    for idx, c in enumerate(counts):
+        if c > counts[best_idx]:
+            best_idx = idx
+    return cands[best_idx][0], cands[best_idx][1], counts[best_idx], counts[hub_idx]
+
+
+# =========================================================
+# 2.6 공유 문서 생성 (PDF / HTML)
+# =========================================================
+_FONT_CANDIDATES = [
+    "NanumGothic.ttf",                                        # 저장소 루트에 직접 포함한 경우
+    "fonts/NanumGothic.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",        # packages.txt: fonts-nanum
+    "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
+    "C:/Windows/Fonts/malgun.ttf",                            # 로컬 윈도우 테스트용
+]
+
+
+def find_korean_font():
+    """PDF에 임베드할 한글 TTF 폰트 경로 탐색. 없으면 None."""
+    for p in _FONT_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def build_share_pdf(meta, att_rows, rest_rows, font_path):
+    """회식 추천 결과 PDF 바이트 생성 (fpdf2 + 한글 TTF 필요).
+    meta: 산출 조건/중심 주소/링크 dict, att_rows: [(이름, 시간문구)],
+    rest_rows: [{rank, name, cat, addr, url}]"""
+    pdf = FPDF(format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.add_font("KR", "", font_path)
+    epw = pdf.epw
+
+    def section(txt):
+        pdf.ln(2)
+        pdf.set_font("KR", size=12)
+        pdf.set_text_color(20, 40, 90)
+        pdf.cell(0, 8, txt)
+        pdf.ln(9)
+        pdf.set_text_color(30, 30, 30)
+
+    def body(txt, size=10, h=6):
+        pdf.set_font("KR", size=size)
+        pdf.set_text_color(30, 30, 30)
+        pdf.multi_cell(epw, h, txt)
+
+    # 제목
+    pdf.set_font("KR", size=16)
+    pdf.set_text_color(20, 40, 90)
+    pdf.cell(0, 10, "회식 장소 추천 결과")
+    pdf.ln(11)
+    pdf.set_font("KR", size=9)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(0, 5, f"생성 {meta['generated']} · 행복한 퇴근 이후 v5")
+    pdf.ln(9)
+
+    section("1. 산출 조건")
+    body(f"산출 모드: {meta['mode']}")
+    body(f"산출 기준: {meta['criterion']} / 이동 수단: {meta['transport']} / 회식 예정 {meta['dinner_time']}")
+    body(f"날씨 반영: {meta['weather']}")
+
+    section("2. 추천 중심 위치")
+    body(f"주소: {meta['center_addr']}")
+    pdf.set_font("KR", size=10)
+    pdf.set_text_color(0, 80, 200)
+    pdf.cell(0, 6, "> 카카오맵에서 위치 열기", link=meta["kakao_link"])
+    pdf.ln(8)
+    pdf.set_text_color(30, 30, 30)
+
+    section("3. 참석자별 예상 이동시간")
+    pdf.set_font("KR", size=10)
+    name_w, t_w = epw * 0.6, epw * 0.4
+    pdf.set_fill_color(235, 240, 250)
+    pdf.cell(name_w, 7, "참석자", border=1, fill=True)
+    pdf.cell(t_w, 7, "예상 소요시간", border=1, fill=True)
+    pdf.ln(7)
+    for name, t in att_rows:
+        pdf.cell(name_w, 7, str(name)[:24], border=1)
+        pdf.cell(t_w, 7, str(t), border=1)
+        pdf.ln(7)
+
+    section(f"4. 추천 맛집 TOP {len(rest_rows)} - {meta['category']}")
+    if rest_rows:
+        for r in rest_rows:
+            pdf.set_font("KR", size=11)
+            pdf.set_text_color(30, 30, 30)
+            pdf.multi_cell(epw, 6, f"{r['rank']}위  {r['name']}  ({r['cat']})")
+            pdf.set_font("KR", size=9)
+            pdf.set_text_color(90, 90, 90)
+            pdf.multi_cell(epw, 5, f"주소: {r['addr']}")
+            if r.get("url"):
+                pdf.set_text_color(0, 80, 200)
+                pdf.cell(0, 5, "> 카카오맵 상세 보기", link=r["url"])
+                pdf.ln(6)
+            pdf.ln(1)
+    else:
+        body("해당 종류의 매장을 찾지 못했습니다.")
+
+    if meta.get("notice"):
+        pdf.ln(2)
+        pdf.set_font("KR", size=9)
+        pdf.set_text_color(160, 80, 0)
+        pdf.multi_cell(epw, 5, f"※ {meta['notice']}")
+
+    pdf.ln(3)
+    pdf.set_font("KR", size=8)
+    pdf.set_text_color(150, 150, 150)
+    pdf.multi_cell(epw, 4, "소요시간은 산출 시점의 실시간 교통(카카오내비) 기준 추정치이며 실제와 다를 수 있습니다.")
+    return bytes(pdf.output())
+
+
+def build_share_html(meta, att_rows, rest_rows):
+    """회식 추천 결과 HTML 바이트 생성 (폰트 임베드 불필요, 항상 동작)"""
+    esc = html.escape
+    att_html = "".join(f"<tr><td>{esc(str(n))}</td><td>{esc(str(t))}</td></tr>"
+                       for n, t in att_rows)
+    if rest_rows:
+        items = []
+        for r in rest_rows:
+            link = (f"<a href='{esc(r['url'])}' target='_blank'>카카오맵 상세 보기</a>"
+                    if r.get("url") else "")
+            items.append(
+                f"<li><div class='rname'>{r['rank']}위 · {esc(r['name'])} "
+                f"<span class='rcat'>{esc(r['cat'])}</span></div>"
+                f"<div class='raddr'>{esc(r['addr'])}</div>{link}</li>")
+        rest_html = "".join(items)
+    else:
+        rest_html = "<li>해당 종류의 매장을 찾지 못했습니다.</li>"
+    notice_html = (f"<p class='notice'>※ {esc(meta['notice'])}</p>"
+                   if meta.get("notice") else "")
+    page = f"""<!DOCTYPE html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>회식 장소 추천 결과</title>
+<style>
+ body{{font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;max-width:640px;
+      margin:0 auto;padding:20px;color:#222;line-height:1.55}}
+ h1{{font-size:22px;color:#14285a;margin-bottom:4px}}
+ .sub{{color:#888;font-size:12px;margin-bottom:18px}}
+ h2{{font-size:15px;color:#14285a;border-left:4px solid #14285a;padding-left:8px;
+    margin:22px 0 8px}}
+ table{{width:100%;border-collapse:collapse;font-size:13px}}
+ td,th{{border:1px solid #ccd;padding:6px 8px;text-align:left}}
+ th{{background:#eef2fa}}
+ ul{{list-style:none;padding:0}}
+ li{{border:1px solid #e2e6f0;border-radius:8px;padding:10px 12px;margin-bottom:8px}}
+ .rname{{font-weight:bold}} .rcat{{color:#888;font-weight:normal;font-size:12px}}
+ .raddr{{color:#666;font-size:12px;margin:2px 0}}
+ a{{color:#0050c8;font-size:12px}}
+ .meta p{{margin:2px 0;font-size:13px}}
+ .notice{{color:#a05000;font-size:12px}}
+ .foot{{color:#999;font-size:11px;margin-top:20px}}
+</style></head><body>
+<h1>회식 장소 추천 결과</h1>
+<div class="sub">생성 {esc(meta['generated'])} · 행복한 퇴근 이후 v5</div>
+<h2>산출 조건</h2>
+<div class="meta">
+ <p>산출 모드: {esc(meta['mode'])}</p>
+ <p>산출 기준: {esc(meta['criterion'])} / 이동 수단: {esc(meta['transport'])} / 회식 예정 {esc(meta['dinner_time'])}</p>
+ <p>날씨 반영: {esc(meta['weather'])}</p>
+</div>
+<h2>추천 중심 위치</h2>
+<div class="meta">
+ <p>{esc(meta['center_addr'])}</p>
+ <p><a href="{esc(meta['kakao_link'])}" target="_blank">카카오맵에서 위치 열기</a></p>
+</div>
+<h2>참석자별 예상 이동시간</h2>
+<table><tr><th>참석자</th><th>예상 소요시간</th></tr>{att_html}</table>
+<h2>추천 맛집 TOP {len(rest_rows)} — {esc(meta['category'])}</h2>
+<ul>{rest_html}</ul>
+{notice_html}
+<div class="foot">소요시간은 산출 시점 실시간 교통(카카오내비) 기준 추정치이며 실제와 다를 수 있습니다.</div>
+</body></html>"""
+    return page.encode("utf-8")
 
 
 # =========================================================
@@ -605,6 +937,15 @@ with tab2:
         horizontal=True,
     )
 
+    mode_choice = st.radio(
+        "🧭 위치 산출 모드",
+        ["자동", "일반(격자) 고정", "장거리(거점역) 고정"],
+        key="m2_mode",
+        horizontal=True,
+    )
+    st.caption(f"자동: 참석자 간 최대 직선 이격이 {_LONG_DIST_KM}km 이상이면 전국 KTX/SRT 거점역 기반 장거리 모드로 전환합니다. "
+               "같은 도시·인접 도시 모임은 일반(격자) 탐색으로 계산됩니다.")
+
     tc1, tc2 = st.columns(2)
     transport = tc1.radio("🚗 이동 수단", ["자동차", "대중교통 (간이 추정)"], key="m2_transport", horizontal=True)
     dinner_time = tc2.time_input("🕖 회식 예정 시각", datetime.strptime("19:00", "%H:%M").time(), key="m2_dinner")
@@ -634,109 +975,168 @@ with tab2:
                         for p in addresses]
                 sources = [(l["lat"], l["lon"]) for l in locs]
                 fair_mode = criterion.startswith("공평")
-
-                avg_lat = sum(l["lat"] for l in locs) / len(locs)
-                avg_lon = sum(l["lon"] for l in locs) / len(locs)
-
-                # 참석자 분포에 따라 후보 간격 자동 조절
                 spread = max_spread_km(sources)
-                off_km = min(max(spread / 2.0, 1.5), 6.0)
 
-                def pick_best(mat, cands):
-                    b_idx, b_score, b_times = None, float("inf"), []
-                    for d_idx in range(len(cands)):
-                        ts = [mat[s][d_idx] for s in range(len(sources))]
-                        if any(t is None for t in ts):
-                            continue
-                        score = max(ts) if fair_mode else sum(ts)
-                        if score < b_score:
-                            b_idx, b_score, b_times = d_idx, score, ts
-                    return b_idx, b_times
-
-                step.info(f"① 1단계 광역 탐색 중 (후보 간격 {off_km:.1f}km, 실시간 소요시간)...")
-                cand1 = make_grid(avg_lat, avg_lon, off_km)
-                mat1 = build_realtime_matrix(sources, cand1)
-                idx1, times1 = pick_best(mat1, cand1)
-                realtime = idx1 is not None
-
-                if idx1 is None:
-                    step.info("① 카카오 실시간 실패, OSRM 표준 경로로 대체 탐색 중...")
-                    coords = sources + cand1
-                    coord_str = ";".join([f"{lon},{lat}" for lat, lon in coords])
-                    src_str = ";".join(map(str, range(len(sources))))
-                    dst_str = ";".join(map(str, range(len(sources), len(coords))))
-                    data = osrm_request(f"/table/v1/driving/{coord_str}?sources={src_str}&destinations={dst_str}")
-                    durations = data.get("durations", [])
-                    if durations:
-                        osrm_mat = [[(durations[s][d] / 60.0 if durations[s][d] is not None else None)
-                                     for d in range(len(cand1))] for s in range(len(sources))]
-                        idx1, times1 = pick_best(osrm_mat, cand1)
-
-                if idx1 is None:
-                    step.empty()
-                    st.error("경로 소요시간 계산에 실패했습니다. 잠시 후 다시 시도해 주세요.")
+                if mode_choice.startswith("장거리"):
+                    long_mode = True
+                elif mode_choice.startswith("일반"):
+                    long_mode = False
                 else:
-                    b_lat, b_lon = cand1[idx1]
-                    best_times = times1
+                    long_mode = spread >= _LONG_DIST_KM
 
-                    # 2단계 정밀 탐색 (실시간 성공 시에만)
-                    if realtime:
-                        step.info("② 2단계 정밀 탐색 중 (최적 후보 주변 재탐색)...")
-                        cand2 = make_grid(b_lat, b_lon, max(off_km / 3.0, 0.5))
-                        mat2 = build_realtime_matrix(sources, cand2)
-                        idx2, times2 = pick_best(mat2, cand2)
-                        if idx2 is not None:
-                            s1 = max(times1) if fair_mode else sum(times1)
-                            s2 = max(times2) if fair_mode else sum(times2)
-                            if s2 <= s1:
-                                b_lat, b_lon = cand2[idx2]
-                                best_times = times2
+                if long_mode:
+                    # ---------- 장거리 모드: 거점 도시(역) 선정 → 상권 분석 ----------
+                    step.info(f"① 장거리 모드 (최대 이격 {spread:.0f}km). 전국 거점역 후보 평가 중...")
+                    hub, hub_times, realtime = select_best_hub(sources, fair_mode)
 
-                    step.info("③ 음식 종류별 상권 수집 중 (광역 재탐색 포함)...")
-                    rests_by_cat, adjusted_by_cat = fetch_all_category_restaurants(b_lat, b_lon, search_radius)
+                    step.info(f"② 거점 확정: {hub['city']} {hub['name']}. 역 주변 상권 밀집 지점 분석 중...")
+                    c_lat, c_lon, best_cnt, hub_cnt = refine_center_by_density(
+                        hub["lat"], hub["lon"], count_radius_m=max(int(search_radius), 400))
 
-                    # 재조정된 종류는 밀집 중심까지의 시간/경로 추가 계산
-                    for a_label, a_info in adjusted_by_cat.items():
-                        a_lat, a_lon = a_info["center"]
-                        a_times, a_paths = [], []
-                        for (s_lat, s_lon) in sources:
-                            _, a_dur, a_path = get_kakao_navi_baseline(s_lat, s_lon, a_lat, a_lon)
-                            a_times.append(a_dur)
-                            a_paths.append(a_path if a_path else None)
-                        a_info["times"] = a_times
-                        a_info["paths"] = a_paths
+                    step.info("③ 참석자별 실제 경로·소요시간 수집 중 (자동차 기준)...")
+                    best_times, route_paths = [], []
+                    for s_idx, (s_lat, s_lon) in enumerate(sources):
+                        _, dur, path = get_kakao_navi_baseline(s_lat, s_lon, c_lat, c_lon)
+                        if dur is None and hub_times:
+                            dur = hub_times[s_idx]
+                        best_times.append(dur)
+                        if path:
+                            route_paths.append(thin_path(path))
+                        else:
+                            route_paths.append(thin_path(
+                                get_real_road_path([[s_lat, s_lon], [c_lat, c_lon]])))
 
-                    step.info("④ 참석자별 실제 이동 경로 수집 중...")
-                    route_paths = [get_route_path(s_lat, s_lon, b_lat, b_lon)
-                                   for (s_lat, s_lon) in sources]
+                    step.info("④ 음식 종류별 상권 수집 중 (광역 재탐색 포함)...")
+                    rests_by_cat, adjusted_by_cat = fetch_all_category_restaurants(
+                        c_lat, c_lon, search_radius)
+                    # 장거리에서는 종류별 재조정 지점의 시간/경로 재계산을 생략 (근사 표시)
 
-                    # 회식 시각 혼잡도 보정 계수 (표시용 추정치)
                     t_now = now_kst()
-                    now_h = t_now.hour + t_now.minute / 60.0
-                    din_h = dinner_time.hour + dinner_time.minute / 60.0
-                    t_factor = (1.0 + peak_val(din_h) * 1.2) / (1.0 + peak_val(now_h) * 1.2)
-                    t_factor = min(max(t_factor, 0.7), 1.6)
-
-                    # 중심 좌표 기준 날씨 보정
-                    w_desc2, _ = get_realtime_weather_and_temp(round(b_lat, 3), round(b_lon, 3))
+                    w_desc2, _ = get_realtime_weather_and_temp(round(c_lat, 3), round(c_lon, 3))
                     w_mult2 = weather_multiplier(w_desc2)
 
                     st.session_state.dinner_data = {
-                        "locs": locs, "b_lat": b_lat, "b_lon": b_lon,
-                        "paths": route_paths,
-                        "best_times": best_times, "rests_by_cat": rests_by_cat,
-                        "adjusted_by_cat": adjusted_by_cat,
-                        "radius": search_radius,
-                        "realtime": realtime,
+                        "locs": locs, "b_lat": c_lat, "b_lon": c_lon,
+                        "paths": route_paths, "best_times": best_times,
+                        "rests_by_cat": rests_by_cat, "adjusted_by_cat": adjusted_by_cat,
+                        "radius": search_radius, "realtime": realtime,
                         "criterion": "공평 우선" if fair_mode else "효율 우선",
                         "calc_time": t_now.strftime("%H:%M"),
-                        "time_factor": t_factor,
+                        "time_factor": 1.0,
                         "dinner_label": dinner_time.strftime("%H:%M"),
                         "weather": w_desc2, "w_mult": w_mult2,
                         "transit": transport.startswith("대중교통"),
-                        "spread_km": round(spread, 1), "off_km": round(off_km, 1),
+                        "spread_km": round(spread, 1), "off_km": 0.0,
+                        "mode": "long",
+                        "hub_city": hub["city"], "hub_name": hub["name"],
+                        "hub_lat": hub["lat"], "hub_lon": hub["lon"],
+                        "density_best": best_cnt, "density_hub": hub_cnt,
                     }
-                    step.success("✅ 완료. 아래 결과를 확인하세요.")
+                    step.success("✅ 완료 (장거리 모드). 아래 결과를 확인하세요.")
+                else:
+                    # ---------- 일반 모드: 기존 2단계 격자 탐색 ----------
+                    avg_lat = sum(l["lat"] for l in locs) / len(locs)
+                    avg_lon = sum(l["lon"] for l in locs) / len(locs)
+
+                    # 참석자 분포에 따라 후보 간격 자동 조절
+                    off_km = min(max(spread / 2.0, 1.5), 6.0)
+
+                    def pick_best(mat, cands):
+                        b_idx, b_score, b_times = None, float("inf"), []
+                        for d_idx in range(len(cands)):
+                            ts = [mat[s][d_idx] for s in range(len(sources))]
+                            if any(t is None for t in ts):
+                                continue
+                            score = max(ts) if fair_mode else sum(ts)
+                            if score < b_score:
+                                b_idx, b_score, b_times = d_idx, score, ts
+                        return b_idx, b_times
+
+                    step.info(f"① 1단계 광역 탐색 중 (후보 간격 {off_km:.1f}km, 실시간 소요시간)...")
+                    cand1 = make_grid(avg_lat, avg_lon, off_km)
+                    mat1 = build_realtime_matrix(sources, cand1)
+                    idx1, times1 = pick_best(mat1, cand1)
+                    realtime = idx1 is not None
+
+                    if idx1 is None:
+                        step.info("① 카카오 실시간 실패, OSRM 표준 경로로 대체 탐색 중...")
+                        coords = sources + cand1
+                        coord_str = ";".join([f"{lon},{lat}" for lat, lon in coords])
+                        src_str = ";".join(map(str, range(len(sources))))
+                        dst_str = ";".join(map(str, range(len(sources), len(coords))))
+                        data = osrm_request(f"/table/v1/driving/{coord_str}?sources={src_str}&destinations={dst_str}")
+                        durations = data.get("durations", [])
+                        if durations:
+                            osrm_mat = [[(durations[s][d] / 60.0 if durations[s][d] is not None else None)
+                                         for d in range(len(cand1))] for s in range(len(sources))]
+                            idx1, times1 = pick_best(osrm_mat, cand1)
+
+                    if idx1 is None:
+                        step.empty()
+                        st.error("경로 소요시간 계산에 실패했습니다. 잠시 후 다시 시도해 주세요.")
+                    else:
+                        b_lat, b_lon = cand1[idx1]
+                        best_times = times1
+
+                        # 2단계 정밀 탐색 (실시간 성공 시에만)
+                        if realtime:
+                            step.info("② 2단계 정밀 탐색 중 (최적 후보 주변 재탐색)...")
+                            cand2 = make_grid(b_lat, b_lon, max(off_km / 3.0, 0.5))
+                            mat2 = build_realtime_matrix(sources, cand2)
+                            idx2, times2 = pick_best(mat2, cand2)
+                            if idx2 is not None:
+                                s1 = max(times1) if fair_mode else sum(times1)
+                                s2 = max(times2) if fair_mode else sum(times2)
+                                if s2 <= s1:
+                                    b_lat, b_lon = cand2[idx2]
+                                    best_times = times2
+
+                        step.info("③ 음식 종류별 상권 수집 중 (광역 재탐색 포함)...")
+                        rests_by_cat, adjusted_by_cat = fetch_all_category_restaurants(b_lat, b_lon, search_radius)
+
+                        # 재조정된 종류는 밀집 중심까지의 시간/경로 추가 계산
+                        for a_label, a_info in adjusted_by_cat.items():
+                            a_lat, a_lon = a_info["center"]
+                            a_times, a_paths = [], []
+                            for (s_lat, s_lon) in sources:
+                                _, a_dur, a_path = get_kakao_navi_baseline(s_lat, s_lon, a_lat, a_lon)
+                                a_times.append(a_dur)
+                                a_paths.append(a_path if a_path else None)
+                            a_info["times"] = a_times
+                            a_info["paths"] = a_paths
+
+                        step.info("④ 참석자별 실제 이동 경로 수집 중...")
+                        route_paths = [get_route_path(s_lat, s_lon, b_lat, b_lon)
+                                       for (s_lat, s_lon) in sources]
+
+                        # 회식 시각 혼잡도 보정 계수 (표시용 추정치)
+                        t_now = now_kst()
+                        now_h = t_now.hour + t_now.minute / 60.0
+                        din_h = dinner_time.hour + dinner_time.minute / 60.0
+                        t_factor = (1.0 + peak_val(din_h) * 1.2) / (1.0 + peak_val(now_h) * 1.2)
+                        t_factor = min(max(t_factor, 0.7), 1.6)
+
+                        # 중심 좌표 기준 날씨 보정
+                        w_desc2, _ = get_realtime_weather_and_temp(round(b_lat, 3), round(b_lon, 3))
+                        w_mult2 = weather_multiplier(w_desc2)
+
+                        st.session_state.dinner_data = {
+                            "locs": locs, "b_lat": b_lat, "b_lon": b_lon,
+                            "paths": route_paths,
+                            "best_times": best_times, "rests_by_cat": rests_by_cat,
+                            "adjusted_by_cat": adjusted_by_cat,
+                            "radius": search_radius,
+                            "realtime": realtime,
+                            "criterion": "공평 우선" if fair_mode else "효율 우선",
+                            "calc_time": t_now.strftime("%H:%M"),
+                            "time_factor": t_factor,
+                            "dinner_label": dinner_time.strftime("%H:%M"),
+                            "weather": w_desc2, "w_mult": w_mult2,
+                            "transit": transport.startswith("대중교통"),
+                            "spread_km": round(spread, 1), "off_km": round(off_km, 1),
+                            "mode": "normal",
+                        }
+                        step.success("✅ 완료. 아래 결과를 확인하세요.")
             except Exception as e:
                 log_error("회식 산출", e)
                 step.empty()
@@ -746,12 +1146,21 @@ with tab2:
         d = st.session_state.dinner_data
         st.markdown("#### 🗺️ 위치 분석 결과")
 
+        if d.get("mode") == "long":
+            density_note = ""
+            if d.get("density_best", 0) > d.get("density_hub", 0):
+                density_note = (f" 역 주변 상권 분석 결과, 음식점이 더 밀집한 지점"
+                                f"(반경 내 약 {d['density_best']}곳)으로 중심을 조정했습니다.")
+            st.info(f"🚄 장거리 모드: 참석자 최대 이격 {d.get('spread_km', '?')}km. "
+                    f"교통 거점으로 **{d.get('hub_city', '')} {d.get('hub_name', '')}** 일대를 선정했습니다."
+                    + density_note)
+
         def disp_time(mins):
             """저장된 자동차 실시간 소요시간을 표시용 값으로 변환 (회식시각/날씨/이동수단 보정)"""
             if mins is None:
                 return None
             t = mins * d.get("time_factor", 1.0) * d.get("w_mult", 1.0)
-            if d.get("transit"):
+            if d.get("transit") and d.get("mode") != "long":
                 t = t * 1.6 + 12.0
             return t
 
@@ -763,9 +1172,14 @@ with tab2:
         adj = d.get("adjusted_by_cat", {}).get(view_cat)
         if adj:
             eff_lat, eff_lon = adj["center"]
-            eff_times = adj.get("times", [])
-            eff_paths = adj.get("paths", [])
-            st.info(f"기본 반경 내에 {view_cat} 매장이 없어, 가장 가까운 {view_cat} 밀집 지역으로 중심을 재조정했습니다. 지도에는 기존 중심(빨간 별)과 재조정 중심(주황 별)이 함께 표시되며, 시간과 경로는 재조정 위치 기준입니다.")
+            if adj.get("times"):
+                eff_times = adj["times"]
+                eff_paths = adj.get("paths", [])
+                st.info(f"기본 반경 내에 {view_cat} 매장이 없어, 가장 가까운 {view_cat} 밀집 지역으로 중심을 재조정했습니다. 지도에는 기존 중심(빨간 별)과 재조정 중심(주황 별)이 함께 표시되며, 시간과 경로는 재조정 위치 기준입니다.")
+            else:
+                eff_times = d.get("best_times", [])
+                eff_paths = d.get("paths", [])
+                st.info(f"기본 반경 내에 {view_cat} 매장이 없어, 가장 가까운 {view_cat} 밀집 지역으로 중심을 재조정했습니다. 장거리 모드에서는 표시되는 시간·경로가 기존 중심 기준 근사치입니다.")
         else:
             eff_lat, eff_lon = d["b_lat"], d["b_lon"]
             eff_times = d.get("best_times", [])
@@ -777,8 +1191,14 @@ with tab2:
                 t = disp_time(eff_times[idx] if idx < len(eff_times) else None)
                 cols[idx].metric(loc["name"], f"{int(round(t))}분" if t is not None else "계산 실패")
             traffic_label = "카카오내비 실시간 기반" if d.get("realtime") else "표준 경로 기준 (실시간 미반영)"
-            mode_label = "대중교통 간이 추정" if d.get("transit") else "자동차"
-            st.caption(f"{d.get('calc_time', '')} 실시간 계산, 회식 시각 {d.get('dinner_label', '')} 혼잡도 보정 x{d.get('time_factor', 1.0):.2f}, 날씨({d.get('weather', '')}) 보정 x{d.get('w_mult', 1.0):.2f}, {mode_label} 기준, {traffic_label}, {d.get('criterion', '')} 산출")
+            if d.get("mode") == "long":
+                st.caption(f"{d.get('calc_time', '')} 실시간 계산, 자동차 기준, {traffic_label}, "
+                           f"날씨({d.get('weather', '')}) 보정 x{d.get('w_mult', 1.0):.2f}, {d.get('criterion', '')} 산출 · "
+                           f"장거리 모임은 KTX/SRT 등 대중교통 이용을 권장합니다 "
+                           f"(장거리에는 대중교통 간이 추정과 회식시각 혼잡도 보정을 적용하지 않습니다).")
+            else:
+                mode_label = "대중교통 간이 추정" if d.get("transit") else "자동차"
+                st.caption(f"{d.get('calc_time', '')} 실시간 계산, 회식 시각 {d.get('dinner_label', '')} 혼잡도 보정 x{d.get('time_factor', 1.0):.2f}, 날씨({d.get('weather', '')}) 보정 x{d.get('w_mult', 1.0):.2f}, {mode_label} 기준, {traffic_label}, {d.get('criterion', '')} 산출")
 
         try:
             m = folium.Map(location=[eff_lat, eff_lon], zoom_start=14, tiles="CartoDB positron")
@@ -828,6 +1248,11 @@ with tab2:
                                 color="#555555", weight=2, dash_array="4, 6",
                                 tooltip=f"중심 이동 거리 약 {shift_km:.1f}km").add_to(m)
 
+            if d.get("mode") == "long":
+                folium.Marker([d["hub_lat"], d["hub_lon"]],
+                              popup=f"교통 거점: {d.get('hub_city', '')} {d.get('hub_name', '')}",
+                              icon=folium.Icon(color="purple", icon="train", prefix="fa")).add_to(m)
+
             for r in sel_rests:
                 folium.Marker([float(r["y"]), float(r["x"])], popup=r["place_name"],
                               icon=folium.Icon(color="green", icon="cutlery")).add_to(m)
@@ -837,6 +1262,9 @@ with tab2:
             if adj:
                 all_lats.append(d["b_lat"])
                 all_lons.append(d["b_lon"])
+            if d.get("mode") == "long":
+                all_lats.append(d["hub_lat"])
+                all_lons.append(d["hub_lon"])
             m.fit_bounds([[min(all_lats), min(all_lons)], [max(all_lats), max(all_lons)]])
 
             st_folium(m, use_container_width=True, height=350, key="map_dinner", returned_objects=[])
@@ -858,9 +1286,17 @@ with tab2:
             else:
                 st.info(f"기본 반경과 광역 재탐색 모두에서 {view_cat} 매장을 찾지 못했습니다. 다른 종류를 선택해 보세요.")
 
+            # 공유용 위치 정보 (문구/문서 공용)
+            center_addr = coord_to_address(eff_lat, eff_lon) or f"좌표 {eff_lat:.5f}, {eff_lon:.5f}"
+            kakao_link = ("https://map.kakao.com/link/map/"
+                          + urllib.parse.quote("회식 추천 위치") + f",{eff_lat:.6f},{eff_lon:.6f}")
+
             # 공유 문구 자동 생성
             st.markdown("#### 📣 공유 문구")
             lines = [f"[회식 안내] {view_cat} 회식 장소 추천 결과입니다."]
+            if d.get("mode") == "long":
+                lines.append(f"거점: {d.get('hub_city', '')} {d.get('hub_name', '')} 일대")
+            lines.append(f"추천 위치: {center_addr}")
             if sel_rests:
                 top = sel_rests[0]
                 t_addr = top.get("road_address_name", "").strip() or top.get("address_name", "")
@@ -869,10 +1305,70 @@ with tab2:
                 t = disp_time(eff_times[idx] if idx < len(eff_times) else None)
                 if t is not None:
                     lines.append(f"{loc['name']}: 약 {int(round(t))}분")
-            lines.append(f"기준: {d.get('dinner_label', '')} 출발 예상 ({'대중교통 간이 추정' if d.get('transit') else '자동차'})")
+            mode_label2 = "자동차" if d.get("mode") == "long" else ("대중교통 간이 추정" if d.get("transit") else "자동차")
+            lines.append(f"기준: {d.get('dinner_label', '')} 출발 예상 ({mode_label2})")
+            lines.append(f"위치 지도: {kakao_link}")
             share_msg = "\n".join(lines)
             st.code(share_msg, language="text")
             st.caption("오른쪽 위 복사 아이콘으로 복사해 단체방에 공유하세요.")
+
+            # 결과 문서 저장 (PDF / HTML)
+            st.markdown("#### 📄 문서로 공유 (PDF / HTML)")
+            st.caption("현재 선택한 음식 종류 기준으로 문서를 만듭니다. 저장한 파일을 카카오톡·메일 등에 첨부해 공유하세요.")
+            try:
+                att_rows = []
+                for idx, loc in enumerate(d["locs"]):
+                    t = disp_time(eff_times[idx] if idx < len(eff_times) else None)
+                    att_rows.append((loc["name"], f"약 {int(round(t))}분" if t is not None else "계산 실패"))
+                rest_rows = []
+                for r_idx, r in enumerate(sel_rests):
+                    addr = r.get("road_address_name", "").strip() or r.get("address_name", "주소 정보 없음")
+                    rest_rows.append({"rank": r_idx + 1, "name": r["place_name"],
+                                      "cat": r.get("category_name", "").split(">")[-1].strip(),
+                                      "addr": addr, "url": r.get("place_url", "")})
+                meta = {
+                    "generated": now_kst().strftime("%Y-%m-%d %H:%M"),
+                    "mode": (f"장거리 (거점: {d.get('hub_city', '')} {d.get('hub_name', '')})"
+                             if d.get("mode") == "long" else "일반 (근거리 격자 탐색)"),
+                    "criterion": d.get("criterion", ""),
+                    "transport": ("대중교통 간이 추정"
+                                  if d.get("transit") and d.get("mode") != "long"
+                                  else "자동차 (실시간)"),
+                    "dinner_time": d.get("dinner_label", ""),
+                    "weather": f"{d.get('weather', '')} (보정 x{d.get('w_mult', 1.0):.2f})",
+                    "category": view_cat,
+                    "center_addr": center_addr,
+                    "kakao_link": kakao_link,
+                    "notice": ("장거리 모임은 KTX/SRT 등 대중교통 이용을 권장합니다. 표기 시간은 자동차 실시간 기준입니다."
+                               if d.get("mode") == "long" else ""),
+                }
+                fname_cat = (view_cat.replace("/", "·").replace(" ", "")
+                             .replace("(", "").replace(")", ""))
+                stamp = now_kst().strftime("%m%d_%H%M")
+
+                html_bytes = build_share_html(meta, att_rows, rest_rows)
+                dcol1, dcol2 = st.columns(2)
+                font_path = find_korean_font()
+                if _HAS_FPDF and font_path:
+                    try:
+                        pdf_bytes = build_share_pdf(meta, att_rows, rest_rows, font_path)
+                        dcol1.download_button("📄 PDF 저장", data=pdf_bytes,
+                                              file_name=f"회식추천_{fname_cat}_{stamp}.pdf",
+                                              mime="application/pdf", use_container_width=True)
+                    except Exception as e:
+                        log_error("PDF 생성", e)
+                        dcol1.warning("PDF 생성에 실패했습니다. HTML 저장을 이용해 주세요.")
+                else:
+                    missing = "fpdf2 미설치" if not _HAS_FPDF else "한글 폰트 미탑재"
+                    dcol1.warning(f"PDF 생성 불가 ({missing}). requirements.txt에 fpdf2, "
+                                  "packages.txt에 fonts-nanum을 추가하거나 저장소에 NanumGothic.ttf를 "
+                                  "넣어 주세요. 우선 HTML 저장을 이용할 수 있습니다.")
+                dcol2.download_button("🌐 HTML 저장", data=html_bytes,
+                                      file_name=f"회식추천_{fname_cat}_{stamp}.html",
+                                      mime="text/html", use_container_width=True)
+            except Exception as e:
+                log_error("공유 문서", e)
+                st.caption("공유 문서를 준비하는 중 문제가 발생했습니다.")
         except Exception as e:
             log_error("회식 지도", e)
             st.caption("결과 화면을 준비하는 중입니다.")
